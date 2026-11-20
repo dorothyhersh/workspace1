@@ -32,7 +32,7 @@ jobs:
           APK_URL: ${{ inputs.apk_url }}
           APK_MEGA_FILE: facebook-apk/facebook.zip
           RCLONE_CONF_CONTENT: ${{ secrets.RCLONE_CONF }}
-        run: timeout 1000 bash signupscripts/download-apk.sh
+        run: timeout 1000 bash emulatorbackup/download-apk.sh
 
       - name: Enable KVM
         run: |

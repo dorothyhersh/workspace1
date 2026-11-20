@@ -56,7 +56,7 @@ jobs:
           emulator-boot-timeout: 600
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics -no-snapshot-save
           disable-animations: true
-          script: bash emulatorscripts/install-facebook.sh
+          script: bash emulatorbackup/install-facebook.sh
 
       - name: Check snapshot exists on disk
         run: |

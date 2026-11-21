@@ -7,6 +7,11 @@ on:
         description: "Which accounts from the Mega sheet: all, or emails separated by commas"
         required: false
         default: "all"
+      retry_suspended:
+        description: "Also try accounts whose STATUS in the sheet is 'suspended' (default: skip them, saves time)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -30,6 +35,7 @@ jobs:
         env:
           RCLONE_CONF_CONTENT: ${{ secrets.RCLONE_CONF }}
           ACCOUNTS: ${{ github.event.inputs.accounts }}
+          RETRY_SUSPENDED: ${{ github.event.inputs.retry_suspended }}
         run: |
           curl -fsSL -o /tmp/rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip -q -j /tmp/rclone.zip '*/rclone' -d /tmp && sudo install -m755 /tmp/rclone /usr/local/bin/rclone
@@ -39,7 +45,8 @@ jobs:
           REMOTE="$MEGA_REMOTE"
           rclone listremotes | grep -qx "${REMOTE}:" || { echo "remote '${REMOTE}' not found in RCLONE_CONF (found: $(rclone listremotes | tr '\n' ' '))"; exit 1; }
           rclone copyto "${REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE}" "$RUNNER_TEMP/conf.xlsx" --retries 5 -q
-          python3 scripts/shared/load-config-from-mega.py "$RUNNER_TEMP/conf.xlsx" "${ACCOUNTS:-all}" --json "$RUNNER_TEMP/accounts.json"
+          SKIP=--skip-suspended; [ "$RETRY_SUSPENDED" = "true" ] && SKIP=""
+          python3 scripts/shared/load-config-from-mega.py "$RUNNER_TEMP/conf.xlsx" "${ACCOUNTS:-all}" --json "$RUNNER_TEMP/accounts.json" $SKIP
           rm -f "$RUNNER_TEMP/conf.xlsx"
 
       - name: Connect to Tailscale

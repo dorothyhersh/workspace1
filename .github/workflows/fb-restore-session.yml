@@ -1,4 +1,4 @@
-name: FB - Restore saved Facebook login from Mega into the emulator (phone IP)
+name: FB - Restore saved Facebook login from Mega into the emulator (download on runner IP, restore on phone IP)
 
 on:
   workflow_dispatch:
@@ -96,7 +96,7 @@ jobs:
           test -d ~/.android/avd/fb-base.avd/snapshots/fb_ready
 
       # ---- 2. boot snapshot -> phone exit node -> login -> backup -> Mega ----
-      - name: Boot emulator, switch to phone IP, restore saved login
+      - name: Boot emulator, download on runner IP, restore on phone IP
         env:
           PHONE_IP: ${{ env.PHONE_IP }}
           BASELINE_IP: ${{ env.BASELINE_IP }}
@@ -110,7 +110,7 @@ jobs:
           MEGA_FOLDER: facebook-android-backup
           MEGA_FILE: ${{ env.MEGA_FILE }}      # fb-session-<email>.tgz.enc, from the sheet
         run: |
-          bash scripts/run-with-emulator.sh bash -c 'timeout 300 bash scripts/use-phone-exit-node.sh && bash scripts/restore-session.sh'
+          bash scripts/run-with-emulator.sh bash scripts/restore-session.sh
 
       # First run (or after 7 idle days) comes from Mega; this saves it to the GitHub cache so every
       # next run restores it in seconds instead of downloading >1 GB from Mega again.

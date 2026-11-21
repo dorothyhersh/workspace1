@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lib-ui.sh - generic adb / UI helpers (sourced, not run directly)
 
-log() { printf '[fb %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; printf '%s' "$*" > "${ARTIFACTS:-/tmp}/phase" 2>/dev/null || true; }
+log() { printf '[fb] %s\n' "$*"; }
 adb_sh() { adb shell "$@" | tr -d '\r'; }
 
 screenshot() {
@@ -22,19 +22,10 @@ wait_for_boot() {
   adb wait-for-device
   local i=0
   while (( i < 180 )); do
-    [[ "$(adb_sh getprop sys.boot_completed 2>/dev/null || true)" == "1" ]] && break
+    [[ "$(adb_sh getprop sys.boot_completed 2>/dev/null || true)" == "1" ]] && { sleep 5; return 0; }
     sleep 2; i=$((i+1))
   done
-  (( i < 180 )) || { log "timed out waiting for boot"; return 1; }
-  # sys.boot_completed can read 1 right after a snapshot resume before the package
-  # manager service is actually answering ("Can't find service: package"), so confirm
-  # it responds before moving on. Usually instant; only slow if it's genuinely not ready.
-  local j=0
-  while (( j < 30 )); do
-    adb_sh pm list packages >/dev/null 2>&1 && return 0
-    sleep 1; j=$((j+1))
-  done
-  log "package manager service not responding after boot"; return 1
+  log "timed out waiting for boot"; return 1
 }
 
 # Full dump (retries). Use ui_dump_fast on screens where a video plays.
@@ -157,13 +148,12 @@ menu_profile_name() {
 
 switcher_open() { grep -qiE 'Create Facebook Page|Open Accounts Center' "$UI_XML"; }
 
-# pure check on the already-dumped $UI_XML (no new dump)
-logged_in_xml() {
+is_logged_in() {
+  ui_dump || return 1
   ! grep -qiE 'Create new account|Forgot password|Log in to Facebook' "$UI_XML" \
     && ! switcher_open \
     && grep -qiE 'Home|What.s on your mind|Notifications|Menu' "$UI_XML"
 }
-is_logged_in() { ui_dump || return 1; logged_in_xml; }
 
 # Closes the Menu screen so the feed (with the + button) is showing
 return_to_feed() {

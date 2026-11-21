@@ -91,8 +91,14 @@ settle_device
 sleep 2
 screenshot "00-home-screen.png"
 
-adb shell pm list packages | grep -F "$PACKAGE_NAME" \
-  || { log "ERROR: $PACKAGE_NAME is not installed in this emulator snapshot"; exit 1; }
+PKG_FOUND=""
+for _try in 1 2 3 4 5; do
+  PKG_FOUND="$(adb shell pm list packages 2>&1 | grep -F "$PACKAGE_NAME" || true)"
+  [[ -n "$PKG_FOUND" ]] && break
+  sleep 2
+done
+[[ -n "$PKG_FOUND" ]] || { log "ERROR: $PACKAGE_NAME is not installed in this emulator snapshot"; exit 1; }
+log "$PKG_FOUND"
 
 log "downloading ${MEGA_FOLDER}/${MEGA_FILE} on the runner's own IP (fast)"
 mega_download_backup || exit 1

@@ -124,13 +124,13 @@ reset_clean_state() {
   local out; out="$(timeout 120 adb emu avd snapshot load "$SNAPSHOT_NAME" 2>&1 | tr -d '\r')"
   log "snapshot load: $(printf '%s' "$out" | tr '\n' ' ' | head -c 200)"
   if grep -q '^OK' <<<"$out"; then
-    sleep 5; timeout 20 adb reconnect >/dev/null 2>&1; adb wait-for-device
+    sleep 2; timeout 20 adb reconnect >/dev/null 2>&1; adb wait-for-device
     wait_for_boot || return 1
   else
     log "WARNING: snapshot load failed -> fallback 'pm clear' (the login-form guard still refuses a logged-in app)"
     adb shell am force-stop "$PACKAGE_NAME"; adb shell pm clear "$PACKAGE_NAME" >/dev/null 2>&1 || true
   fi
-  settle_device; sleep 5
+  settle_device; sleep 2
   dismiss_system_dialogs
   adb shell pm list packages | grep -qF "$PACKAGE_NAME" || { log "ERROR: $PACKAGE_NAME missing after reset"; return 1; }
 }
@@ -140,17 +140,20 @@ backup_session() {
   [[ -n "${BACKUP_PASSPHRASE:-}" ]] || { log "backup failed: BACKUP_PASSPHRASE empty"; return 1; }
   need_root || { log "backup failed: adb root not available"; return 1; }
   adb shell am force-stop "$PACKAGE_NAME"; sleep 2; adb shell sync
-  local remote=/data/local/tmp/fb-session.tgz
-  adb shell "rm -f $remote; tar -czf $remote --exclude='*/cache/*' --exclude='*/code_cache/*' -C /data/data $PACKAGE_NAME" \
+  # speed: the emulator CPU is slow at gzip, so pack WITHOUT compression there and compress on the runner
+  local remote=/data/local/tmp/fb-session.tar raw="$TMPD/fb-session.raw.tar"
+  adb shell "rm -f $remote; tar -cf $remote --exclude='*/cache/*' --exclude='*/code_cache/*' -C /data/data $PACKAGE_NAME" \
     || { log "backup failed: tar error"; return 1; }
-  adb pull "$remote" "$SESSION_TMP" >/dev/null 2>&1 || { log "backup failed: pull error"; return 1; }
+  adb pull "$remote" "$raw" >/dev/null 2>&1 || { log "backup failed: pull error"; return 1; }
   adb shell "rm -f $remote"
+  gzip -1 -c "$raw" > "$SESSION_TMP" || { log "backup failed: gzip error"; rm -f "$raw" "$SESSION_TMP"; return 1; }
+  rm -f "$raw"
   local size; size="$(stat -c%s "$SESSION_TMP" 2>/dev/null || echo 0)"
   (( size < 10000 )) && { log "backup failed: archive too small ($size)"; rm -f "$SESSION_TMP"; return 1; }
   openssl enc -aes-256-cbc -pbkdf2 -salt -in "$SESSION_TMP" -out "$BACKUP_FILE" -pass env:BACKUP_PASSPHRASE \
     || { log "backup failed: encryption error"; rm -f "$SESSION_TMP"; return 1; }
   rm -f "$SESSION_TMP"
-  cp "$BACKUP_FILE" "$PENDING_DIR/$MEGA_FILE" && rm -f "$BACKUP_FILE" || return 1
+  mv "$BACKUP_FILE" "$PENDING_DIR/$MEGA_FILE" || return 1
   printf '%s\t%s\n' "$FB_IDENTIFIER" "$MEGA_FILE" >> "$PENDING_LIST"
   log "encrypted backup ready for upload: $MEGA_FILE ($(stat -c%s "$PENDING_DIR/$MEGA_FILE") bytes)"
 }
@@ -159,10 +162,18 @@ backup_session() {
 login_account() {
   phone_guard || return 1
 
-  launch_app; sleep 12
+  launch_app
+  # wait only as long as needed (was: fixed 12s) - up to 25s for the login form or the feed
+  local w=$SECONDS
+  while (( SECONDS - w < 25 )); do
+    sleep 2
+    ui_dump || continue
+    grep -q 'EditText' "$UI_XML" && break
+    is_logged_in && break
+  done
   dismiss_system_dialogs
   shot "02-after-launch.png"
-  dismiss_popups 2
+  if [[ -z "$(ui_query class 'EditText' 0 2>/dev/null || true)" ]]; then dismiss_popups 2; fi
   shot "03-before-login.png"
 
   if [[ -z "$(ui_find class 'EditText' 0 || true)" ]]; then
@@ -184,20 +195,26 @@ login_account() {
 
   phone_guard || return 1   # still on the phone IP right before submitting?
   tap_text '^Log ?in$' "" 3 || adb shell input keyevent 66
-  sleep 15
-  dismiss_system_dialogs
-  shot "07-after-login-15s.png"
-
-  if ui_dump; then
-    grep -qiE 'incorrect|wrong|invalid|doesn.t match' "$UI_XML" && log "WARNING: credentials look wrong"
-    grep -qiE 'two-factor|authentication app|confirm it.s you|checkpoint|suspicious|secure your account' "$UI_XML" \
-      && log "WARNING: Facebook is asking for a security check / 2FA code. Complete it manually; automation stops here."
-  fi
-
-  sleep 10
-  tap_text '^(Save|OK)$' "" 1 || true     # "Save your login info?"
-  sleep 3
-  post_login_prompts 12 || true
+  # poll (was: fixed 15s + 10s + 3s sleeps): stop as soon as the feed, a security check or a wrong password shows
+  local t=$SECONDS bad=0 xy
+  sleep 4
+  while (( SECONDS - t < 50 )); do
+    dismiss_system_dialogs
+    if ! ui_dump; then sleep 2; continue; fi
+    if grep -qiE 'incorrect|wrong|invalid|doesn.t match' "$UI_XML"; then
+      log "WARNING: credentials look wrong"; bad=1; break
+    fi
+    if grep -qiE 'two-factor|authentication app|confirm it.s you|checkpoint|suspicious|secure your account' "$UI_XML"; then
+      log "WARNING: Facebook is asking for a security check / 2FA code. Complete it manually; automation stops here."; bad=1; break
+    fi
+    xy="$(ui_query text '^(Save|OK)$' 0 || true)"     # "Save your login info?"
+    if [[ -n "$xy" ]]; then log "tapping Save/OK at $xy"; adb shell input tap $xy; sleep 2; continue; fi
+    is_logged_in && { log "feed detected after $((SECONDS - t))s"; break; }
+    sleep 2
+  done
+  shot "07-after-login.png"
+  if (( bad )); then log "WARNING: not creating a backup (login needs attention)"; return 1; fi
+  post_login_prompts 6 || true
   shot "08-after-popups.png"
 
   if is_logged_in; then
@@ -213,24 +230,44 @@ login_account() {
 # ---------- Mega: switch off phone link, upload all backups, update the sheet ----------
 switch_to_runner_ip() {
   log "switching OFF the phone exit node for the Mega uploads"
-  sudo tailscale set --exit-node= || { log "WARNING: could not clear the exit node"; return 1; }
-  sleep 5
-  log "public IP now: $(curl -s --max-time 30 https://ifconfig.me || echo unknown)  (runner baseline: ${BASELINE_IP:-unknown})"
+  timeout -k 3 30 sudo tailscale set --exit-node= || { log "WARNING: could not clear the exit node"; return 1; }
+  sleep 2
+  log "public IP now: $(curl -s --max-time 15 https://ifconfig.me || echo unknown)  (runner baseline: ${BASELINE_IP:-unknown})"
 }
 
-# mega_upload_file <local file> <name in Mega>; sets $DATED to the dated copy name
-mega_upload_file() {
-  local src="$1" name="$2" stamp base f
-  stamp="$(date -u +%Y%m%d-%H%M%S)"; base="${name%.tgz.enc}"; DATED="${base}.${stamp}.tgz.enc"
-  rclone copyto "$src" "${MEGA_DIR}/${name}" --retries 5 -q </dev/null || return 1
-  rclone copyto "$src" "${MEGA_DIR}/${DATED}" --retries 5 -q </dev/null || { log "WARNING: dated copy not uploaded"; DATED=""; }
-  [[ -n "$(rclone lsf "${MEGA_DIR}/${name}" 2>/dev/null </dev/null)" ]] || { log "upload not verified"; return 1; }
-  if [[ "$MEGA_KEEP" =~ ^[0-9]+$ ]]; then   # prune only THIS account's dated copies
-    while IFS= read -r f; do
-      [[ -n "$f" ]] && rclone deletefile "${MEGA_DIR}/${f}" --mega-hard-delete 2>/dev/null </dev/null || true
-    done < <(rclone lsf "$MEGA_DIR" --include "${base}.2*.tgz.enc" 2>/dev/null </dev/null | sort | head -n -"$MEGA_KEEP")
-  fi
-  return 0
+# Uploads EVERY pending backup (main name + dated copy) in ONE parallel rclone call (was: sequential,
+# 2 uploads + 2 listings per account), verifies with ONE listing, prunes old dated copies once.
+upload_all() {
+  local stage="$TMPD/upload-stage" stamp email name base dated listing
+  rm -rf "$stage"; mkdir -p "$stage"
+  stamp="$(date -u +%Y%m%d-%H%M%S)"
+  declare -gA DATED_OF=()
+  while IFS=$'\t' read -r email name; do
+    base="${name%.tgz.enc}"; dated="${base}.${stamp}.tgz.enc"
+    ln "$PENDING_DIR/$name" "$stage/$name" 2>/dev/null || cp "$PENDING_DIR/$name" "$stage/$name"
+    ln "$PENDING_DIR/$name" "$stage/$dated" 2>/dev/null || cp "$PENDING_DIR/$name" "$stage/$dated"
+    DATED_OF["$name"]="$dated"
+  done < "$PENDING_LIST"
+  log "uploading $(ls "$stage" | wc -l) files to Mega in parallel"
+  rclone copy "$stage" "$MEGA_DIR" --transfers 8 --checkers 8 --ignore-times --retries 5 --low-level-retries 10 -q </dev/null \
+    || log "WARNING: rclone reported errors (checking which files arrived)"
+  listing="$(rclone lsf "$MEGA_DIR" 2>/dev/null </dev/null)"
+  while IFS=$'\t' read -r email name; do
+    if grep -qxF "$name" <<<"$listing"; then
+      log "MEGA UPLOAD OK ($email): ${MEGA_FOLDER}/${name}"
+      grep -qxF "${DATED_OF[$name]}" <<<"$listing" || DATED_OF["$name"]=""
+      printf '%s\t%s\t%s\n' "$email" "$name" "${DATED_OF[$name]}" >> "$RESULTS_TSV"
+      if [[ "$MEGA_KEEP" =~ ^[0-9]+$ ]]; then   # prune only THIS account's dated copies
+        base="${name%.tgz.enc}"
+        while IFS= read -r f; do
+          [[ -n "$f" ]] && rclone deletefile "${MEGA_DIR}/${f}" --mega-hard-delete 2>/dev/null </dev/null || true
+        done < <(grep -E "^${base//./\\.}\.2[0-9]{7}-[0-9]{6}\.tgz\.enc$" <<<"$listing" | sort | head -n -"$MEGA_KEEP")
+      fi
+    else
+      log "ERROR: upload to Mega failed for $email"; UPLOAD_FAILED+=("$email")
+    fi
+  done < "$PENDING_LIST"
+  rm -rf "$stage"
 }
 
 # Downloads the sheet again (fresh), writes the backup names into it, uploads it back (old copy kept as .bak.xlsx)
@@ -238,8 +275,11 @@ update_sheet() {
   [[ -s "$RESULTS_TSV" ]] || return 0
   local x="$TMPD/conf-update.xlsx" remote="${MEGA_REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE}"
   rclone copyto "$remote" "$x" --retries 5 -q </dev/null || { log "WARNING: cannot download the sheet from Mega"; return 1; }
-  rclone copyto "$x" "${MEGA_REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE%.xlsx}.bak.xlsx" --retries 5 -q </dev/null || true
-  python3 "$DIR/update-sheet-backup-names.py" "$x" "$RESULTS_TSV" || { log "WARNING: sheet update script failed"; rm -f "$x"; return 1; }
+  cp "$x" "$x.bak"
+  rclone copyto "$x.bak" "${MEGA_REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE%.xlsx}.bak.xlsx" --retries 5 -q </dev/null &
+  local bakpid=$!
+  python3 "$DIR/update-sheet-backup-names.py" "$x" "$RESULTS_TSV" || { log "WARNING: sheet update script failed"; kill $bakpid 2>/dev/null; rm -f "$x" "$x.bak"; return 1; }
+  wait $bakpid || log "WARNING: .bak copy of the sheet not uploaded"; rm -f "$x.bak"
   rclone copyto "$x" "$remote" --retries 5 -q </dev/null || { log "WARNING: cannot upload the updated sheet"; rm -f "$x"; return 1; }
   rm -f "$x"
   log "Mega sheet updated: BACKUP_FILE_NAME + BackupLog"
@@ -251,16 +291,7 @@ upload_pending() {
   switch_to_runner_ip || log "WARNING: still on the phone link, uploads may be slow"
   setup_rclone || return 1
   rclone mkdir "$MEGA_DIR" --retries 5 </dev/null || return 1
-  local email name
-  while IFS=$'\t' read -r -u 3 email name; do
-    DATED=""
-    if mega_upload_file "$PENDING_DIR/$name" "$name"; then
-      log "MEGA UPLOAD OK ($email): ${MEGA_FOLDER}/${name}"
-      printf '%s\t%s\t%s\n' "$email" "$name" "$DATED" >> "$RESULTS_TSV"
-    else
-      log "ERROR: upload to Mega failed for $email"; UPLOAD_FAILED+=("$email")
-    fi
-  done 3< "$PENDING_LIST"
+  upload_all
   update_sheet || log "WARNING: backups are in Mega but the sheet was not updated"
 }
 

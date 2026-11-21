@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lib-ui.sh - generic adb / UI helpers (sourced, not run directly)
 
-log() { printf '[fb %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+log() { printf '[fb %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; printf '%s' "$*" > "${ARTIFACTS:-/tmp}/phase" 2>/dev/null || true; }
 adb_sh() { adb shell "$@" | tr -d '\r'; }
 
 screenshot() {

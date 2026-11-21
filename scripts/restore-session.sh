@@ -15,7 +15,7 @@ if [[ -n "${RESTORE_FILE:-}" ]]; then
 fi
 
 need_root() {
-  adb root >/dev/null 2>&1; sleep 3; adb wait-for-device
+  adb root >/dev/null 2>&1; sleep 2; adb wait-for-device
   [[ "$(adb_sh id -u 2>/dev/null)" == "0" ]]
 }
 
@@ -44,7 +44,7 @@ restore_session() {
 log_restored_profile() {
   local name
   if tap_text '^Menu' "" 3; then
-    sleep 6; save_ui "restored-menu"; screenshot "12-restored-menu.png"
+    sleep 3; save_ui "restored-menu"; screenshot "12-restored-menu.png"
     name="$(menu_profile_name)"
     log "restored session profile: '${name:-unknown}'"
     if [[ -n "$FB_PAGE_NAME" ]]; then
@@ -59,9 +59,9 @@ log_restored_profile() {
 # Restore (from an already-downloaded backup) -> launch -> verify logged in. Returns 0 only when the feed is visible.
 restore_flow() {
   restore_session || return 1
-  launch_app; sleep 12; dismiss_system_dialogs
+  launch_app; sleep 8; dismiss_system_dialogs
   screenshot "10-restored-launch.png"
-  dismiss_popups 5; sleep 2
+  dismiss_popups 3; sleep 1
   screenshot "11-restored-after-dismiss.png"
   if is_logged_in; then
     log "RESTORE OK: Facebook opened already logged in"
@@ -78,7 +78,7 @@ finish() {
   local code=$?
   log "exiting with code $code"
   screenshot "99-final-state.png"
-  adb logcat -d > "$ARTIFACTS/logcat.txt" 2>/dev/null
+  adb logcat -d -t 1000 > "$ARTIFACTS/logcat.txt" 2>/dev/null
   rm -f "$SESSION_TMP" "$BACKUP_FILE"
   exit "$code"
 }

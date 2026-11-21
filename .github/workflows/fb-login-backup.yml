@@ -71,28 +71,20 @@ jobs:
             ~/.android/adb*
             /usr/local/lib/android/sdk/system-images/android-30
 
-      # Cache is per-repository and is deleted after 7 days without use. Fallbacks:
-      #   1) Mega: Fbworkflow/emulator/avd.tar.zst (permanent copy)
-      #   2) the 90-day artifact of the latest successful "FB - Build emulator" run in this repo
-      - name: Cache missing -> restore emulator from Mega, else from build artifact
+      # Cache is deleted after 7 days without use, so when it is missing the emulator comes from the
+      # 90-day artifact that "FB - Build emulator + install Facebook" saved in THIS repository.
+      # (After the run, the emulator is saved to the cache again, so the next runs are fast.)
+      - name: Cache missing -> restore emulator from the build workflow artifact
         if: steps.cache.outputs.cache-matched-key == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          SRC="${MEGA_REMOTE}:${MEGA_CONF_FOLDER}/emulator/avd.tar.zst"
-          if [ -n "$(rclone lsf "$SRC" 2>/dev/null)" ]; then
-            echo "restoring emulator from Mega"
-            rclone copyto "$SRC" "$RUNNER_TEMP/avd.tar.zst" --retries 5 --transfers 4 -q
-            zstd -d -T0 -c "$RUNNER_TEMP/avd.tar.zst" | tar -C "$HOME" -xf -
-            rm -f "$RUNNER_TEMP/avd.tar.zst"
-          else
-            echo "not in Mega, trying the build artifact of this repo"
-            RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow fb-emulator-build.yml --status success --limit 5 --json databaseId --jq '.[0].databaseId')
-            [ -n "$RUN_ID" ] || { echo "No emulator backup anywhere - run 'FB - Build emulator + install Facebook' first"; exit 1; }
-            gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n emulator-backup -D "$RUNNER_TEMP/emu"
-            zstd -d -T0 -c "$RUNNER_TEMP/emu/avd.tar.zst" | tar -C "$HOME" -xf -
-            rm -rf "$RUNNER_TEMP/emu"
-          fi
+          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow fb-emulator-build.yml --status success --limit 5 --json databaseId --jq '.[0].databaseId')
+          [ -n "$RUN_ID" ] || { echo "No successful build run found - run 'FB - Build emulator + install Facebook' first (its artifact lasts 90 days)"; exit 1; }
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n emulator-backup -D "$RUNNER_TEMP/emu" \
+            || { echo "Artifact expired (90 days) - run 'FB - Build emulator + install Facebook' again"; exit 1; }
+          zstd -d -T0 -c "$RUNNER_TEMP/emu/avd.tar.zst" | tar -C "$HOME" -xf -
+          rm -rf "$RUNNER_TEMP/emu"
 
       - name: Verify emulator backup is present
         run: |

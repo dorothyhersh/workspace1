@@ -43,7 +43,20 @@ setsid nohup emulator -avd "$AVD" -no-window -gpu swiftshader_indirect -noaudio 
   -camera-back none -no-metrics -snapshot "$SNAP" -no-snapshot-save -verbose >"$ELOG" 2>&1 &
 EPID=$!
 
+# quiet emulator-log line (the verbose log is mostly render-thread noise)
+elog_last() { grep -viE 'RenderThread|ColorBuffer|ShareGroup|^\s*$' "$ELOG" 2>/dev/null | tail -n 1 | cut -c1-160; }
+
+# Heartbeat: every 20s prints what the job is doing right now, so a slow/stuck step is never silent.
+HBPID=""
+heartbeat() {
+  local t0=$SECONDS
+  while sleep 20; do
+    say "heartbeat +$((SECONDS - t0))s | doing: $(cat "$ART/phase" 2>/dev/null | cut -c1-110) | adb: $(timeout 5 adb get-state 2>&1 | tr -d '\r') | app/focus: $(timeout 8 adb shell dumpsys window 2>/dev/null | grep -m1 mCurrentFocus | tr -d '\r' | cut -c1-110)"
+  done
+}
+
 stop_emulator() {
+  [ -n "$HBPID" ] && kill "$HBPID" >/dev/null 2>&1
   adb emu kill >/dev/null 2>&1 || true
   sleep 3
   kill "$EPID" >/dev/null 2>&1 || true
@@ -51,7 +64,8 @@ stop_emulator() {
 dump_log() { say "---- last 60 lines of emulator.log ----"; tail -n 60 "$ELOG" | cut -c1-300; say "---- end ----"; }
 
 # --- wait for boot ---
-start=$SECONDS
+start=$SECONDS; lastp=0
+say "waiting for the emulator to boot (snapshot resume is usually 5-30s, max ${BOOT_TIMEOUT}s)"
 while :; do
   if ! kill -0 "$EPID" 2>/dev/null; then
     say "ERROR: emulator process exited during boot"; dump_log; exit 1
@@ -59,6 +73,10 @@ while :; do
   if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then break; fi
   if (( SECONDS - start > BOOT_TIMEOUT )); then
     say "ERROR: not booted after ${BOOT_TIMEOUT}s (adb: $(adb devices | tr '\n' ' '))"; dump_log; stop_emulator; exit 1
+  fi
+  if (( SECONDS - lastp >= 10 )); then
+    lastp=$SECONDS
+    say "booting... $((SECONDS - start))s | adb: $(adb get-state 2>&1 | tr -d '\r') | sys.boot_completed='$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')' | emulator log: $(elog_last)"
   fi
   sleep 2
 done
@@ -68,6 +86,8 @@ adb devices -l
 
 # --- run the real work ---
 trap 'stop_emulator' EXIT
+heartbeat & HBPID=$!
+say "running: $*"
 "$@"
 code=$?
 say "command finished with exit code $code"

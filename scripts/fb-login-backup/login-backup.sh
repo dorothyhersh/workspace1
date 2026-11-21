@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # login-backup.sh - login + encrypted backup for ONE OR MANY Facebook accounts on the same
 # snapshot emulator, one account at a time, never mixed:
-#   - before every account after the first, the emulator is reset to the clean snapshot (fb_ready),
+#   - before every account after the first (so also right after a failed/suspended one), the emulator is
+#     reset with 'adb emu avd snapshot load fb_ready' (retried 3x, never pm clear),
 #     so each login starts from a Facebook app with NO account in it (one account per app state)
 #   - if Facebook still shows a logged-in feed after the reset, that account is refused (no backup)
 #   - all logins happen on the phone IP; at the end the phone exit node is switched OFF, every
@@ -128,17 +129,20 @@ need_root() {
 }
 
 # Back to the clean snapshot = Facebook installed, nobody logged in, no leftovers of the last account.
+# ONLY "adb emu avd snapshot load" is used (no pm clear). If a load fails it is retried; if all tries fail
+# the function returns 1 and the run stops, so accounts are never mixed.
 reset_clean_state() {
   log "resetting the emulator to the clean '$SNAPSHOT_NAME' snapshot"
-  local out; out="$(timeout 120 adb emu avd snapshot load "$SNAPSHOT_NAME" 2>&1 | tr -d '\r')"
-  log "snapshot load: $(printf '%s' "$out" | tr '\n' ' ' | head -c 200)"
-  if grep -q '^OK' <<<"$out"; then
-    sleep 2; timeout 20 adb reconnect >/dev/null 2>&1; adb wait-for-device
-    wait_for_boot || return 1
-  else
-    log "WARNING: snapshot load failed -> fallback 'pm clear' (the login-form guard still refuses a logged-in app)"
-    adb shell am force-stop "$PACKAGE_NAME"; adb shell pm clear "$PACKAGE_NAME" >/dev/null 2>&1 || true
-  fi
+  local out try ok=0
+  for try in 1 2 3; do
+    out="$(timeout 120 adb emu avd snapshot load "$SNAPSHOT_NAME" 2>&1 | tr -d '\r')"
+    log "snapshot load (try $try/3): $(printf '%s' "$out" | tr '\n' ' ' | head -c 200)"
+    if grep -q '^OK' <<<"$out"; then ok=1; break; fi
+    sleep 5
+  done
+  (( ok )) || { log "ERROR: snapshot load '$SNAPSHOT_NAME' failed 3 times"; return 1; }
+  sleep 2; timeout 20 adb reconnect >/dev/null 2>&1; adb wait-for-device
+  wait_for_boot || return 1
   settle_device; sleep 2
   dismiss_system_dialogs
   adb shell pm list packages | grep -qF "$PACKAGE_NAME" || { log "ERROR: $PACKAGE_NAME missing after reset"; return 1; }

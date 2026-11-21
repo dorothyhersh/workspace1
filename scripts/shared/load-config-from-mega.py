@@ -6,7 +6,7 @@ Every column header (row 1) becomes an environment variable of the same name, so
 per-account settings (FB_PAGE_NAME, REEL_COUNT, ...) only need a new column.
 Used columns: FB_IDENTIFIER, FB_PASSWORD, TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET, BACKUP_FILE_NAME.
 
-Usage: load-config-from-mega.py <file.xlsx> [selector] [--json accounts.json] [--skip-suspended] [--only-active]
+Usage: load-config-from-mega.py <file.xlsx> [selector] [--json accounts.json] [--skip-suspended] [--skip-checked] [--only-active]
   selector  ""                 -> first row (single account)
             "a@x.com"          -> that row only
             "a@x.com,b@x.com"  -> those rows
@@ -16,6 +16,10 @@ Usage: load-config-from-mega.py <file.xlsx> [selector] [--json accounts.json] [-
   --skip-suspended  rows whose STATUS column says "suspended" are not put into --json (saves the
             ~2 minutes a doomed login costs). Only applies to selector "all"/"" - an account you name
             explicitly is always tried again.
+  --skip-checked  (login/backup workflow) rows whose STATUS column is NOT empty (active, suspended,
+            wrong_password, needs_attention, login_failed, ...) were already checked, so they are not put into
+            --json; only rows with an EMPTY STATUS are logged in, in sheet order (top to bottom). Only applies to
+            selector \"all\"/\"\" - an account you name explicitly is always tried again.
   --only-active  (restore workflow) keep ONLY rows with STATUS = active AND a backup name in the sheet, in
             sheet order (top to bottom). Suspended / login-failed / empty-status rows are skipped, also when named.
 The first selected row is exported to $GITHUB_ENV (Tailscale keys come from it).
@@ -26,7 +30,8 @@ import openpyxl
 args = sys.argv[1:]
 skip_suspended = "--skip-suspended" in args
 only_active = "--only-active" in args
-args = [a for a in args if a not in ("--skip-suspended", "--only-active")]
+skip_checked = "--skip-checked" in args
+args = [a for a in args if a not in ("--skip-suspended", "--only-active", "--skip-checked")]
 json_path = None
 if "--json" in args:
     i = args.index("--json"); json_path = args[i + 1]; del args[i:i + 2]
@@ -121,6 +126,11 @@ if only_active:
         else:
             why = f"STATUS={st or '(empty)'}" if st != "active" else "no backup name in the sheet"
             print(f"skipping {d['FB_IDENTIFIER']}: {why} (only active accounts with a backup are restored)")
+elif skip_checked and (sel.lower() == "all" or not sel):
+    to_run = [d for d in ready if not d.get("STATUS", "").strip()]
+    for d in ready:
+        if d not in to_run:
+            print(f"skipping {d['FB_IDENTIFIER']}: STATUS={d['STATUS'].strip().lower()} already checked (run with retry_checked=true to try again)")
 elif skip_suspended and (sel.lower() == "all" or not sel):
     to_run = [d for d in ready if d.get("STATUS", "").strip().lower() != "suspended"]
     for d in ready:

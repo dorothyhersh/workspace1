@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
-# login-backup.sh - ENTRY POINT for "login only + backup".
-# Runs inside the emulator step. The emulator was restored from the cached snapshot (fb_ready),
-# Facebook is ALREADY installed in it, so there is no APK download / install here.
-#   1. wait for the snapshot-booted emulator, check Facebook is installed
-#   2. check traffic leaves through the phone exit node (Telenor IP), refuse otherwise
-#   3. launch Facebook (app data is NOT cleared), type id + password, log in
-#   4. when the feed is visible: encrypted backup of the Facebook app data
-#   5. switch exit node OFF (fast runner internet) and upload the backup to Mega
-# No Page switch, no reels.
-#
-# FB_IDENTIFIER / FB_PASSWORD / MEGA_FILE now come from the Mega sheet
-# (Fbworkflow/login_Setup_Setting_workflow_conf.xlsx), loaded by the workflow's first step.
-# Backup file name = fb-session-<email>.tgz.enc (one backup per account).
+# login-backup.sh - login + encrypted backup for ONE OR MANY Facebook accounts on the same
+# snapshot emulator, one account at a time, never mixed:
+#   - before every account after the first, the emulator is reset to the clean snapshot (fb_ready),
+#     so each login starts from a Facebook app with NO account in it (one account per app state)
+#   - if Facebook still shows a logged-in feed after the reset, that account is refused (no backup)
+#   - all logins happen on the phone IP; at the end the phone exit node is switched OFF, every
+#     backup is uploaded to Mega, and the Mega sheet gets the backup names (BACKUP_FILE_NAME + BackupLog)
+# Accounts come from $ACCOUNTS_JSON (written by scripts/load-config-from-mega.py from the Mega sheet).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,28 +14,63 @@ source "$DIR/config.sh"
 exec > >(tee -a "$ARTIFACTS/run.log") 2>&1
 for f in lib-ui lib-mega; do source "$DIR/$f.sh"; done
 
-FB_IDENTIFIER="${FB_IDENTIFIER:-}"
-FB_PASSWORD="${FB_PASSWORD:-}"
+ACCOUNTS_JSON="${ACCOUNTS_JSON:-}"
 MEGA_KEEP="${MEGA_KEEP:-10}"
-
-# Safety net: if the workflow did not pass a per-account name, derive it from the email
-# so different accounts never overwrite each other's backup.
-if [[ -n "$FB_IDENTIFIER" && ( -z "${MEGA_FILE:-}" || "${MEGA_FILE:-}" == "fb-session.tgz.enc" ) ]]; then
-  _safe="$(printf '%s' "$FB_IDENTIFIER" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9._@-]/_/g')"
-  MEGA_FILE="fb-session-${_safe}.tgz.enc"
-fi
+MEGA_CONF_FOLDER="${MEGA_CONF_FOLDER:-Fbworkflow}"
+MEGA_CONF_FILE="${MEGA_CONF_FILE:-login_Setup_Setting_workflow_conf.xlsx}"
+SNAPSHOT_NAME="${SNAPSHOT_NAME:-fb_ready}"
 MEGA_DIR="${MEGA_REMOTE}:${MEGA_FOLDER}"
+TMPD="${RUNNER_TEMP:-/tmp}"
+PENDING_DIR="$TMPD/pending-backups"
+PENDING_LIST="$TMPD/pending-list.tsv"
+RESULTS_TSV="$TMPD/backup-results.tsv"
+mkdir -p "$PENDING_DIR"; : > "$PENDING_LIST"; : > "$RESULTS_TSV"
+
+# single-account fallback: build a one-entry list from FB_IDENTIFIER / FB_PASSWORD
+if [[ -z "$ACCOUNTS_JSON" || ! -s "$ACCOUNTS_JSON" ]]; then
+  [[ -n "${FB_IDENTIFIER:-}" && -n "${FB_PASSWORD:-}" ]] || { log "ERROR: no accounts (ACCOUNTS_JSON missing/empty)"; exit 1; }
+  ACCOUNTS_JSON="$TMPD/accounts.json"
+  python3 -c 'import json,os;print(json.dumps([{"FB_IDENTIFIER":os.environ["FB_IDENTIFIER"],"FB_PASSWORD":os.environ["FB_PASSWORD"],"MEGA_FILE":os.environ.get("MEGA_FILE","")}]))' > "$ACCOUNTS_JSON"
+fi
+
+SHOT_PREFIX=""
+shot() { screenshot "${SHOT_PREFIX}$1"; }
 
 finish() {
   local code=$?
   log "exiting with code $code"
   screenshot "99-final-state.png"
   adb logcat -d > "$ARTIFACTS/logcat.txt" 2>/dev/null
+  rm -rf "$PENDING_DIR" "$PENDING_LIST" "$ACCOUNTS_JSON" "$SESSION_TMP" "$BACKUP_FILE"
   exit "$code"
 }
 trap finish EXIT
 
-# ---------- helpers that lib-ui.sh does not have ----------
+# ---------- accounts ----------
+ACC_VARS=()
+acc_count() { python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$ACCOUNTS_JSON"; }
+acc_vars() {
+  python3 - "$ACCOUNTS_JSON" "$1" <<'PY'
+import base64, json, sys
+a = json.load(open(sys.argv[1]))[int(sys.argv[2])]
+for k, v in a.items():
+    print(k, base64.b64encode(v.encode()).decode())
+PY
+}
+# Exports every column of account #$1 as an environment variable (and forgets the previous account's).
+load_account() {
+  local k v
+  for k in "${ACC_VARS[@]:-}"; do [[ -n "$k" ]] && unset "$k"; done
+  ACC_VARS=()
+  while read -r k v; do
+    export "$k=$(printf '%s' "$v" | base64 -d)"; ACC_VARS+=("$k")
+  done < <(acc_vars "$1")
+  if [[ -z "${MEGA_FILE:-}" || "$MEGA_FILE" == "fb-session.tgz.enc" ]]; then
+    MEGA_FILE="fb-session-$(printf '%s' "${FB_IDENTIFIER:-}" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9._@-]/_/g').tgz.enc"
+  fi
+}
+
+# ---------- helpers ----------
 phone_guard() {
   [[ -n "${PHONE_IP:-}" ]] || { log "ABORT: PHONE_IP not set; refusing to log in without the phone exit node"; return 1; }
   bash "${ROOT}/scripts/assert-phone-ip.sh" || { log "ABORT: not on the phone IP, refusing to continue"; return 1; }
@@ -61,7 +91,6 @@ type_text() {
   adb shell "input text '$s'" >/dev/null 2>&1
 }
 
-# "Continue in English (US)" -> "Skip" / "Not now" ... until the feed shows
 post_login_prompts() {
   local rounds="${1:-12}" i xy handled
   for ((i=0; i<rounds; i++)); do
@@ -84,35 +113,31 @@ post_login_prompts() {
   return 1
 }
 
-# ---------- Mega upload (per-account file name) ----------
-mega_upload() {
-  setup_rclone || return 1
-  [[ -s "$BACKUP_FILE" ]] || { log "no local backup file"; return 1; }
-  local stamp base
-  stamp="$(date -u +%Y%m%d-%H%M%S)"
-  base="${MEGA_FILE%.tgz.enc}"            # fb-session-<email>
-  rclone mkdir "$MEGA_DIR" --retries 5 || return 1
-  rclone copyto "$BACKUP_FILE" "${MEGA_DIR}/${MEGA_FILE}" --retries 5 -q || return 1
-  rclone copyto "$BACKUP_FILE" "${MEGA_DIR}/${base}.${stamp}.tgz.enc" --retries 5 -q || log "WARNING: dated copy not uploaded"
-  [[ -n "$(rclone lsf "${MEGA_DIR}/${MEGA_FILE}" 2>/dev/null)" ]] || { log "upload not verified"; return 1; }
-  log "MEGA UPLOAD OK: ${MEGA_FOLDER}/${MEGA_FILE}"
-  if [[ "$MEGA_KEEP" =~ ^[0-9]+$ ]]; then
-    local f
-    # only THIS account's dated copies are pruned; other accounts are never touched
-    while IFS= read -r f; do
-      [[ -n "$f" ]] && rclone deletefile "${MEGA_DIR}/${f}" --mega-hard-delete 2>/dev/null || true
-    done < <(rclone lsf "$MEGA_DIR" --include "${base}.2*.tgz.enc" 2>/dev/null | sort | head -n -"$MEGA_KEEP")
-  fi
-}
-
-# ---------- backup (needs adb root) ----------
 need_root() {
   adb root >/dev/null 2>&1; sleep 3; adb wait-for-device
   [[ "$(adb_sh id -u 2>/dev/null)" == "0" ]]
 }
 
+# Back to the clean snapshot = Facebook installed, nobody logged in, no leftovers of the last account.
+reset_clean_state() {
+  log "resetting the emulator to the clean '$SNAPSHOT_NAME' snapshot"
+  local out; out="$(timeout 120 adb emu avd snapshot load "$SNAPSHOT_NAME" 2>&1 | tr -d '\r')"
+  log "snapshot load: $(printf '%s' "$out" | tr '\n' ' ' | head -c 200)"
+  if grep -q '^OK' <<<"$out"; then
+    sleep 5; timeout 20 adb reconnect >/dev/null 2>&1; adb wait-for-device
+    wait_for_boot || return 1
+  else
+    log "WARNING: snapshot load failed -> fallback 'pm clear' (the login-form guard still refuses a logged-in app)"
+    adb shell am force-stop "$PACKAGE_NAME"; adb shell pm clear "$PACKAGE_NAME" >/dev/null 2>&1 || true
+  fi
+  settle_device; sleep 5
+  dismiss_system_dialogs
+  adb shell pm list packages | grep -qF "$PACKAGE_NAME" || { log "ERROR: $PACKAGE_NAME missing after reset"; return 1; }
+}
+
+# Encrypts this account's Facebook app data and parks it in $PENDING_DIR (uploaded at the end).
 backup_session() {
-  [[ -n "$BACKUP_PASSPHRASE" ]] || { log "backup failed: BACKUP_PASSPHRASE empty"; return 1; }
+  [[ -n "${BACKUP_PASSPHRASE:-}" ]] || { log "backup failed: BACKUP_PASSPHRASE empty"; return 1; }
   need_root || { log "backup failed: adb root not available"; return 1; }
   adb shell am force-stop "$PACKAGE_NAME"; sleep 2; adb shell sync
   local remote=/data/local/tmp/fb-session.tgz
@@ -125,55 +150,43 @@ backup_session() {
   openssl enc -aes-256-cbc -pbkdf2 -salt -in "$SESSION_TMP" -out "$BACKUP_FILE" -pass env:BACKUP_PASSPHRASE \
     || { log "backup failed: encryption error"; rm -f "$SESSION_TMP"; return 1; }
   rm -f "$SESSION_TMP"
-  log "encrypted backup created ($(stat -c%s "$BACKUP_FILE") bytes)"
+  cp "$BACKUP_FILE" "$PENDING_DIR/$MEGA_FILE" && rm -f "$BACKUP_FILE" || return 1
+  printf '%s\t%s\n' "$FB_IDENTIFIER" "$MEGA_FILE" >> "$PENDING_LIST"
+  log "encrypted backup ready for upload: $MEGA_FILE ($(stat -c%s "$PENDING_DIR/$MEGA_FILE") bytes)"
 }
 
-# Phone link is only needed for the login. Switch it off so the upload is fast.
-switch_to_runner_ip() {
-  log "switching OFF the phone exit node for the Mega upload"
-  sudo tailscale set --exit-node= || { log "WARNING: could not clear the exit node"; return 1; }
-  sleep 5
-  log "public IP now: $(curl -s --max-time 30 https://ifconfig.me || echo unknown)  (runner baseline: ${BASELINE_IP:-unknown})"
-}
-
-# ---------- login ----------
-login_and_backup() {
-  [[ -n "$FB_IDENTIFIER" && -n "$FB_PASSWORD" ]] || { log "FB_IDENTIFIER / FB_PASSWORD are empty (check the Mega sheet)"; return 1; }
-  log "account: $FB_IDENTIFIER  ->  backup file: ${MEGA_FOLDER}/${MEGA_FILE}"
+# ---------- login of ONE account ----------
+login_account() {
   phone_guard || return 1
 
-  # App data and cache are left untouched (no pm clear).
   launch_app; sleep 12
   dismiss_system_dialogs
-  screenshot "02-after-launch.png"
+  shot "02-after-launch.png"
   dismiss_popups 2
-  screenshot "03-before-login.png"
+  shot "03-before-login.png"
 
   if [[ -z "$(ui_find class 'EditText' 0 || true)" ]]; then
     if is_logged_in; then
-      log "Facebook is already logged in (no login form): skipping typing, going to backup"
-      backup_session || { log "ERROR: backup not created"; return 1; }
-      switch_to_runner_ip || log "WARNING: still on the phone link, the upload may be slow"
-      mega_upload || { log "ERROR: backup created but NOT uploaded to Mega"; return 1; }
-      return 0
+      log "ERROR: Facebook is already logged in although the app was reset - refusing, so accounts are never mixed"
+      return 1
     fi
     tap_text '^Log ?in$' "" 3 || true
     sleep 4
   fi
 
-  tap_field 0 || { screenshot "04-no-form.png"; log "ERROR: login form not found"; return 1; }
+  tap_field 0 || { shot "04-no-form.png"; log "ERROR: login form not found"; return 1; }
   sleep 1; type_text "$FB_IDENTIFIER"; sleep 1
-  screenshot "05-username-entered.png"
+  shot "05-username-entered.png"
   tap_field 1 || { log "ERROR: password field not found"; return 1; }
   sleep 1; type_text "$FB_PASSWORD"; sleep 1
-  screenshot "06-password-entered.png"   # password is masked
+  shot "06-password-entered.png"   # password is masked
   adb shell input keyevent 4 >/dev/null 2>&1; sleep 1
 
   phone_guard || return 1   # still on the phone IP right before submitting?
   tap_text '^Log ?in$' "" 3 || adb shell input keyevent 66
   sleep 15
   dismiss_system_dialogs
-  screenshot "07-after-login-15s.png"
+  shot "07-after-login-15s.png"
 
   if ui_dump; then
     grep -qiE 'incorrect|wrong|invalid|doesn.t match' "$UI_XML" && log "WARNING: credentials look wrong"
@@ -185,31 +198,102 @@ login_and_backup() {
   tap_text '^(Save|OK)$' "" 1 || true     # "Save your login info?"
   sleep 3
   post_login_prompts 12 || true
-  screenshot "08-after-popups.png"
+  shot "08-after-popups.png"
 
   if is_logged_in; then
     log "LOGIN OK (feed is visible)"
-    screenshot "09-feed.png"
+    shot "09-feed.png"
     backup_session || { log "ERROR: backup not created"; return 1; }
-    switch_to_runner_ip || log "WARNING: still on the phone link, the upload may be slow"
-    mega_upload || { log "ERROR: backup created but NOT uploaded to Mega"; return 1; }
     return 0
   fi
   log "WARNING: feed not detected, NOT creating a backup (a good old backup is never replaced by a bad one)"
   return 1
 }
 
+# ---------- Mega: switch off phone link, upload all backups, update the sheet ----------
+switch_to_runner_ip() {
+  log "switching OFF the phone exit node for the Mega uploads"
+  sudo tailscale set --exit-node= || { log "WARNING: could not clear the exit node"; return 1; }
+  sleep 5
+  log "public IP now: $(curl -s --max-time 30 https://ifconfig.me || echo unknown)  (runner baseline: ${BASELINE_IP:-unknown})"
+}
+
+# mega_upload_file <local file> <name in Mega>; sets $DATED to the dated copy name
+mega_upload_file() {
+  local src="$1" name="$2" stamp base f
+  stamp="$(date -u +%Y%m%d-%H%M%S)"; base="${name%.tgz.enc}"; DATED="${base}.${stamp}.tgz.enc"
+  rclone copyto "$src" "${MEGA_DIR}/${name}" --retries 5 -q </dev/null || return 1
+  rclone copyto "$src" "${MEGA_DIR}/${DATED}" --retries 5 -q </dev/null || { log "WARNING: dated copy not uploaded"; DATED=""; }
+  [[ -n "$(rclone lsf "${MEGA_DIR}/${name}" 2>/dev/null </dev/null)" ]] || { log "upload not verified"; return 1; }
+  if [[ "$MEGA_KEEP" =~ ^[0-9]+$ ]]; then   # prune only THIS account's dated copies
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && rclone deletefile "${MEGA_DIR}/${f}" --mega-hard-delete 2>/dev/null </dev/null || true
+    done < <(rclone lsf "$MEGA_DIR" --include "${base}.2*.tgz.enc" 2>/dev/null </dev/null | sort | head -n -"$MEGA_KEEP")
+  fi
+  return 0
+}
+
+# Downloads the sheet again (fresh), writes the backup names into it, uploads it back (old copy kept as .bak.xlsx)
+update_sheet() {
+  [[ -s "$RESULTS_TSV" ]] || return 0
+  local x="$TMPD/conf-update.xlsx" remote="${MEGA_REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE}"
+  rclone copyto "$remote" "$x" --retries 5 -q </dev/null || { log "WARNING: cannot download the sheet from Mega"; return 1; }
+  rclone copyto "$x" "${MEGA_REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE%.xlsx}.bak.xlsx" --retries 5 -q </dev/null || true
+  python3 "$DIR/update-sheet-backup-names.py" "$x" "$RESULTS_TSV" || { log "WARNING: sheet update script failed"; rm -f "$x"; return 1; }
+  rclone copyto "$x" "$remote" --retries 5 -q </dev/null || { log "WARNING: cannot upload the updated sheet"; rm -f "$x"; return 1; }
+  rm -f "$x"
+  log "Mega sheet updated: BACKUP_FILE_NAME + BackupLog"
+}
+
+UPLOAD_FAILED=()
+upload_pending() {
+  [[ -s "$PENDING_LIST" ]] || { log "no backups to upload"; return 0; }
+  switch_to_runner_ip || log "WARNING: still on the phone link, uploads may be slow"
+  setup_rclone || return 1
+  rclone mkdir "$MEGA_DIR" --retries 5 </dev/null || return 1
+  local email name
+  while IFS=$'\t' read -r -u 3 email name; do
+    DATED=""
+    if mega_upload_file "$PENDING_DIR/$name" "$name"; then
+      log "MEGA UPLOAD OK ($email): ${MEGA_FOLDER}/${name}"
+      printf '%s\t%s\t%s\n' "$email" "$name" "$DATED" >> "$RESULTS_TSV"
+    else
+      log "ERROR: upload to Mega failed for $email"; UPLOAD_FAILED+=("$email")
+    fi
+  done 3< "$PENDING_LIST"
+  update_sheet || log "WARNING: backups are in Mega but the sheet was not updated"
+}
+
 # ===================== MAIN =====================
+[[ -n "${BACKUP_PASSPHRASE:-}" ]] || { log "ERROR: BACKUP_PASSPHRASE secret is empty"; exit 1; }
 adb devices -l
 wait_for_boot || exit 1
 settle_device
 sleep 10
 dismiss_system_dialogs
-screenshot "00-home-screen.png"
+shot "00-home-screen.png"
 
 adb shell pm list packages | grep -F "$PACKAGE_NAME" \
   || { log "ERROR: $PACKAGE_NAME is not installed in this emulator snapshot"; exit 1; }
 log "Facebook is already installed in the restored emulator (no APK install needed)"
 
-login_and_backup || { log "ERROR: login/backup failed"; exit 1; }
-log "Done! Login OK and backup uploaded to Mega."
+COUNT="$(acc_count)"
+LOGIN_OK=(); LOGIN_FAILED=()
+for ((n=0; n<COUNT; n++)); do
+  load_account "$n"
+  SHOT_PREFIX="acc$((n+1))-"
+  log "===== account $((n+1))/$COUNT: $FB_IDENTIFIER  ->  backup file: ${MEGA_FOLDER}/${MEGA_FILE} ====="
+  if [[ -z "${FB_IDENTIFIER:-}" || -z "${FB_PASSWORD:-}" ]]; then
+    log "ERROR: FB_IDENTIFIER / FB_PASSWORD empty for this row, skipping"; LOGIN_FAILED+=("row $((n+1))"); continue
+  fi
+  if (( n > 0 )); then
+    reset_clean_state || { log "ERROR: cannot reset the emulator, stopping so accounts are not mixed"; LOGIN_FAILED+=("$FB_IDENTIFIER"); break; }
+  fi
+  if login_account; then LOGIN_OK+=("$FB_IDENTIFIER"); else LOGIN_FAILED+=("$FB_IDENTIFIER"); fi
+done
+
+upload_pending
+
+log "SUMMARY: login+backup OK: ${LOGIN_OK[*]:-none} | login FAILED: ${LOGIN_FAILED[*]:-none} | upload FAILED: ${UPLOAD_FAILED[*]:-none}"
+(( ${#LOGIN_FAILED[@]} == 0 && ${#UPLOAD_FAILED[@]} == 0 && ${#LOGIN_OK[@]} > 0 )) || exit 1
+log "Done! All accounts logged in separately, backups uploaded to Mega and the sheet updated."

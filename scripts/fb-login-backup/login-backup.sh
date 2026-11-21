@@ -344,7 +344,7 @@ log "Facebook is already installed in the restored emulator (no APK install need
 COUNT="$(acc_count)"
 LOGIN_OK=(); LOGIN_SUSPENDED=(); LOGIN_FAILED=(); INFRA_FAIL=0
 if (( COUNT == 0 )); then
-  log "Nothing to do: no account to log in (all rows are STATUS=suspended or have no password). Set the workflow input retry_suspended=true to try suspended ones again."
+  log "Nothing to do: no account to log in (every row already has a STATUS (checked) or has no password). Set the workflow input retry_checked=true to try them again."
   exit 0
 fi
 for ((n=0; n<COUNT; n++)); do

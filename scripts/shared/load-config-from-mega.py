@@ -6,7 +6,7 @@ Every column header (row 1) becomes an environment variable of the same name, so
 per-account settings (FB_PAGE_NAME, REEL_COUNT, ...) only need a new column.
 Used columns: FB_IDENTIFIER, FB_PASSWORD, TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET, BACKUP_FILE_NAME.
 
-Usage: load-config-from-mega.py <file.xlsx> [selector] [--json accounts.json] [--skip-suspended]
+Usage: load-config-from-mega.py <file.xlsx> [selector] [--json accounts.json] [--skip-suspended] [--only-active]
   selector  ""                 -> first row (single account)
             "a@x.com"          -> that row only
             "a@x.com,b@x.com"  -> those rows
@@ -16,6 +16,8 @@ Usage: load-config-from-mega.py <file.xlsx> [selector] [--json accounts.json] [-
   --skip-suspended  rows whose STATUS column says "suspended" are not put into --json (saves the
             ~2 minutes a doomed login costs). Only applies to selector "all"/"" - an account you name
             explicitly is always tried again.
+  --only-active  (restore workflow) keep ONLY rows with STATUS = active AND a backup name in the sheet, in
+            sheet order (top to bottom). Suspended / login-failed / empty-status rows are skipped, also when named.
 The first selected row is exported to $GITHUB_ENV (Tailscale keys come from it).
 """
 import json, os, re, sys, uuid
@@ -23,7 +25,8 @@ import openpyxl
 
 args = sys.argv[1:]
 skip_suspended = "--skip-suspended" in args
-args = [a for a in args if a != "--skip-suspended"]
+only_active = "--only-active" in args
+args = [a for a in args if a not in ("--skip-suspended", "--only-active")]
 json_path = None
 if "--json" in args:
     i = args.index("--json"); json_path = args[i + 1]; del args[i:i + 2]
@@ -59,6 +62,7 @@ def make(row, rownum):
             d[k] = v
     ident = d.get("FB_IDENTIFIER", "")
     name = d.get("BACKUP_FILE_NAME", "")
+    d["BACKUP_PRESENT"] = "1" if name else "0"     # did the sheet row really have a backup name?
     if not name:
         name = "fb-session-" + re.sub(r"[^a-z0-9._@-]", "_", ident.lower()) + ".tgz.enc"
     elif not name.endswith(".tgz.enc"):
@@ -107,6 +111,22 @@ for d in ready:
                 if line.strip():
                     print(f"::add-mask::{line}")
 
+to_run = ready
+if only_active:
+    to_run = []
+    for d in ready:
+        st = d.get("STATUS", "").strip().lower()
+        if st == "active" and d.get("BACKUP_PRESENT") == "1":
+            to_run.append(d)
+        else:
+            why = f"STATUS={st or '(empty)'}" if st != "active" else "no backup name in the sheet"
+            print(f"skipping {d['FB_IDENTIFIER']}: {why} (only active accounts with a backup are restored)")
+elif skip_suspended and (sel.lower() == "all" or not sel):
+    to_run = [d for d in ready if d.get("STATUS", "").strip().lower() != "suspended"]
+    for d in ready:
+        if d not in to_run:
+            print(f"skipping {d['FB_IDENTIFIER']}: STATUS=suspended (run with retry_suspended=true to try again)")
+
 first = ready[0]
 exported = []
 with open(os.environ["GITHUB_ENV"], "a") as f:
@@ -117,14 +137,7 @@ with open(os.environ["GITHUB_ENV"], "a") as f:
         f.write(f"{k}<<{d}\n{v}\n{d}\n")
         exported.append(k)
     if json_path:
-        f.write(f"ACCOUNTS_JSON={json_path}\n")
-
-to_run = ready
-if skip_suspended and (sel.lower() == "all" or not sel):
-    to_run = [d for d in ready if d.get("STATUS", "").strip().lower() != "suspended"]
-    for d in ready:
-        if d not in to_run:
-            print(f"skipping {d['FB_IDENTIFIER']}: STATUS=suspended (run with retry_suspended=true to try again)")
+        f.write(f"ACCOUNTS_JSON={json_path}\nACCOUNT_COUNT={len(to_run)}\n")
 
 if json_path:
     with open(json_path, "w") as jf:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run-with-emulator.sh <command...>
-# Boots the cached AVD (snapshot fb_ready) headless WITHOUT android-emulator-runner, so the emulator's
+# Boots the restored AVD (snapshot fb_ready) headless WITHOUT android-emulator-runner, so the emulator's
 # own log is kept (artifacts/emulator.log), runs <command...>, then shuts the emulator down.
 # Exit code = exit code of <command...> (or 1 if the emulator never boots).
 set -uo pipefail
@@ -17,23 +17,22 @@ export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PA
 say() { echo "[$(date -u +%H:%M:%S)] [emu] $*"; }
 [ "$#" -gt 0 ] || { say "usage: run-with-emulator.sh <command...>"; exit 2; }
 
-# --- SDK pieces: once ~/.android/avd/* + the emulator/platform-tools/system-image dirs are all
-# cached together (after a rebuild with the updated cache paths), this whole block is skipped. ---
+# --- SDK pieces: restored from the artifact by restore-emulator.sh; sdkmanager is only a fallback. ---
 if [ -x "$SDK/emulator/emulator" ] && [ -x "$SDK/platform-tools/adb" ] \
    && [ -d "$SDK/system-images/android-30/google_apis/x86_64" ]; then
-  say "emulator + platform-tools + system image already present (from cache), skipping sdkmanager"
+  say "emulator + platform-tools + system image already present (from artifact), skipping sdkmanager"
 else
   yes | sdkmanager --licenses >/dev/null 2>&1 || true
   say "installing emulator + platform-tools"
   sdkmanager --install emulator platform-tools --channel=0 >/dev/null 2>&1 || say "WARNING: sdkmanager install returned non-zero"
   if [ ! -d "$SDK/system-images/android-30/google_apis/x86_64" ]; then
-    say "system image missing from cache, installing"
+    say "system image missing, installing"
     sdkmanager --install 'system-images;android-30;google_apis;x86_64' --channel=0 >/dev/null 2>&1 || true
   fi
 fi
 say "emulator: $(emulator -version 2>&1 | grep -i 'version' | head -1)"
 say "AVDs: $(emulator -list-avds | tr '\n' ' ')"
-emulator -list-avds | grep -qx "$AVD" || { say "ERROR: AVD '$AVD' not found (cache restore problem?)"; ls -la ~/.android/avd/ || true; exit 1; }
+emulator -list-avds | grep -qx "$AVD" || { say "ERROR: AVD '$AVD' not found (artifact restore problem?)"; ls -la ~/.android/avd/ || true; exit 1; }
 say "snapshots on disk: $(ls ~/.android/avd/$AVD.avd/snapshots/ 2>/dev/null | tr '\n' ' ')"
 df -h / | tail -1; free -m | sed -n 2p
 
@@ -41,7 +40,7 @@ df -h / | tail -1; free -m | sed -n 2p
 adb kill-server >/dev/null 2>&1; adb start-server >/dev/null 2>&1
 say "starting emulator (snapshot $SNAP)"
 setsid nohup emulator -avd "$AVD" -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim \
-  -camera-back none -no-metrics -snapshot "$SNAP" -no-snapshot-save -verbose >"$ELOG" 2>&1 &
+  -camera-back none -no-metrics -snapshot "$SNAP" -no-snapshot-save -read-only -verbose >"$ELOG" 2>&1 &
 EPID=$!
 
 stop_emulator() {

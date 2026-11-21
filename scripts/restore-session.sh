@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
-# restore.sh - restores the Facebook login (from the Mega backup) into the emulator and verifies it.
-# Sourced by run.sh. Needs adb root.
+# restore-session.sh - restores the Facebook login (from the Mega backup) into the emulator and verifies it.
+# Run by the "FB - Restore saved Facebook login" workflow inside the emulator-runner step. Needs adb root.
+set -uo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$DIR/config.sh"
+exec > >(tee -a "$ARTIFACTS/run.log") 2>&1
+for f in lib-ui lib-mega; do source "$DIR/$f.sh"; done
+
+# an explicit backup name typed into the workflow (e.g. fb-session-<email>.20261121-003351.tgz.enc) wins
+if [[ -n "${RESTORE_FILE:-}" ]]; then
+  MEGA_FILE="$RESTORE_FILE"
+  log "using backup file from workflow input: $MEGA_FILE"
+fi
 
 need_root() {
   adb root >/dev/null 2>&1; sleep 3; adb wait-for-device
@@ -14,8 +26,8 @@ restore_session() {
   openssl enc -d -aes-256-cbc -pbkdf2 -in "$BACKUP_FILE" -out "$SESSION_TMP" -pass env:BACKUP_PASSPHRASE \
     || { log "restore failed: decryption error (wrong BACKUP_PASSPHRASE?)"; return 1; }
   tar -tzf "$SESSION_TMP" >/dev/null 2>&1 || { log "restore failed: corrupt archive"; return 1; }
-  local uid; uid="$(adb_sh stat -c %u "/data/data/$PACKAGE_NAME")"
-  [[ -n "$uid" ]] || { log "restore failed: Facebook is not installed in this emulator"; return 1; }
+  local uid; uid="$(adb_sh stat -c %u "/data/data/$PACKAGE_NAME" 2>/dev/null | tail -1)"
+  [[ "$uid" =~ ^[0-9]+$ ]] || { log "restore failed: Facebook is not installed in this emulator"; return 1; }
   local remote=/data/local/tmp/fb-session.tgz
   adb shell am force-stop "$PACKAGE_NAME"
   adb push "$SESSION_TMP" "$remote" >/dev/null 2>&1 || { log "restore failed: push error"; return 1; }
@@ -61,3 +73,29 @@ restore_flow() {
   log "RESTORE FAILED: not logged in (see screenshots 10 and 11)"
   return 1
 }
+
+# ===================== MAIN =====================
+finish() {
+  local code=$?
+  log "exiting with code $code"
+  screenshot "99-final-state.png"
+  adb logcat -d > "$ARTIFACTS/logcat.txt" 2>/dev/null
+  rm -f "$SESSION_TMP" "$BACKUP_FILE"
+  exit "$code"
+}
+trap finish EXIT
+
+[[ -n "${BACKUP_PASSPHRASE:-}" ]] || { log "ERROR: BACKUP_PASSPHRASE secret is empty"; exit 1; }
+adb devices -l
+wait_for_boot || exit 1
+settle_device
+sleep 10
+dismiss_system_dialogs
+screenshot "00-home-screen.png"
+
+adb shell pm list packages | grep -F "$PACKAGE_NAME" \
+  || { log "ERROR: $PACKAGE_NAME is not installed in this emulator snapshot"; exit 1; }
+
+log "restoring ${MEGA_FOLDER}/${MEGA_FILE}"
+restore_flow || exit 1
+log "Done! Saved Facebook login restored."

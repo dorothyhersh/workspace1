@@ -1,4 +1,4 @@
-name: Emulator Spoof - Infinix Smart 8 Plus
+name: Emulator Test - Infinix Smart 8 Plus Profile
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  spoofed-emulator:
+  emulator-screenshot:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -20,40 +20,36 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Start Emulator + Spoof Device + Take Screenshot
+      - name: Start Emulator + Apply Screen Profile + Take Screenshot
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 33
           target: google_apis
           arch: x86_64
           profile: pixel_6
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          ram-size: 4096M
+          disk-size: 8G
+          cores: 2
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -no-metrics
           disable-animations: true
           script: |
-            echo "===== Spoofing as Infinix Smart 8 Plus ====="
+            echo "===== Applying Infinix Smart 8 Plus screen profile ====="
+            adb shell wm size 720x1612
+            adb shell wm density 270
+            sleep 3
 
-            adb shell setprop ro.product.brand "Infinix"
-            adb shell setprop ro.product.manufacturer "INFINIX"
-            adb shell setprop ro.product.model "Infinix X6526"
-            adb shell setprop ro.product.device "INFINIX-X6526"
-            adb shell setprop ro.product.name "X6526-OP"
-            adb shell setprop ro.product.board "mt6765"
-            adb shell setprop ro.hardware "mt6765"
-            adb shell setprop ro.product.marketname "Infinix SMART 8 Plus"
-            adb shell setprop ro.build.fingerprint "INFINIX/X6526-OP/INFINIX-X6526:13/TP1A.220624.014/240718V1594:user/release-keys"
-            adb shell setprop ro.kernel.qemu "0"
-            adb shell setprop ro.boot.qemu "0"
+            echo "===== Display settings ====="
+            adb shell wm size
+            adb shell wm density
 
-            echo "===== Current Device Props ====="
+            echo "===== Device info (emulator values) ====="
             adb shell getprop ro.product.model
-            adb shell getprop ro.product.brand
             adb shell getprop ro.product.manufacturer
-            adb shell getprop ro.build.fingerprint
+            adb shell getprop ro.build.version.release
 
-            echo "===== Taking Screenshot ====="
+            echo "===== Taking screenshot ====="
             adb exec-out screencap -p > screenshot.png
-
-            echo "Screenshot saved!"
+            ls -l screenshot.png
 
       - name: Upload Screenshot Artifact
         uses: actions/upload-artifact@v4

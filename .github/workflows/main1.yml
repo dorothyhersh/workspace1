@@ -1,0 +1,63 @@
+name: Emulator Spoof - Infinix Smart 8 Plus
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  spoofed-emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Start Emulator + Spoof Device + Take Screenshot
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          disable-animations: true
+          script: |
+            echo "===== Spoofing as Infinix Smart 8 Plus ====="
+
+            adb shell setprop ro.product.brand "Infinix"
+            adb shell setprop ro.product.manufacturer "INFINIX"
+            adb shell setprop ro.product.model "Infinix X6526"
+            adb shell setprop ro.product.device "INFINIX-X6526"
+            adb shell setprop ro.product.name "X6526-OP"
+            adb shell setprop ro.product.board "mt6765"
+            adb shell setprop ro.hardware "mt6765"
+            adb shell setprop ro.product.marketname "Infinix SMART 8 Plus"
+            adb shell setprop ro.build.fingerprint "INFINIX/X6526-OP/INFINIX-X6526:13/TP1A.220624.014/240718V1594:user/release-keys"
+            adb shell setprop ro.kernel.qemu "0"
+            adb shell setprop ro.boot.qemu "0"
+
+            echo "===== Current Device Props ====="
+            adb shell getprop ro.product.model
+            adb shell getprop ro.product.brand
+            adb shell getprop ro.product.manufacturer
+            adb shell getprop ro.build.fingerprint
+
+            echo "===== Taking Screenshot ====="
+            adb exec-out screencap -p > screenshot.png
+
+            echo "Screenshot saved!"
+
+      - name: Upload Screenshot Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: infinix-smart-8-plus-screenshot
+          path: screenshot.png
+          retention-days: 7

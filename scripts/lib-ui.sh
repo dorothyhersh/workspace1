@@ -22,10 +22,19 @@ wait_for_boot() {
   adb wait-for-device
   local i=0
   while (( i < 180 )); do
-    [[ "$(adb_sh getprop sys.boot_completed 2>/dev/null || true)" == "1" ]] && { sleep 5; return 0; }
+    [[ "$(adb_sh getprop sys.boot_completed 2>/dev/null || true)" == "1" ]] && break
     sleep 2; i=$((i+1))
   done
-  log "timed out waiting for boot"; return 1
+  (( i < 180 )) || { log "timed out waiting for boot"; return 1; }
+  # sys.boot_completed can read 1 right after a snapshot resume before the package
+  # manager service is actually answering ("Can't find service: package"), so confirm
+  # it responds before moving on. Usually instant; only slow if it's genuinely not ready.
+  local j=0
+  while (( j < 30 )); do
+    adb_sh pm list packages >/dev/null 2>&1 && return 0
+    sleep 1; j=$((j+1))
+  done
+  log "package manager service not responding after boot"; return 1
 }
 
 # Full dump (retries). Use ui_dump_fast on screens where a video plays.

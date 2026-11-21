@@ -1,4 +1,4 @@
-name: FB - Restore saved Facebook login from Mega into the emulator (download on runner IP, restore on phone IP)
+name: FB - Restore saved Facebook login from Mega into the emulator (phone IP)
 
 on:
   workflow_dispatch:
@@ -74,8 +74,6 @@ jobs:
             ~/.android/avd/*
             ~/.android/adb*
             /usr/local/lib/android/sdk/system-images/android-30
-            /usr/local/lib/android/sdk/emulator
-            /usr/local/lib/android/sdk/platform-tools
 
       # Cache is deleted after 7 days without use, so when it is missing the emulator comes from the
       # 90-day artifact that "FB - Build emulator + install Facebook" saved in THIS repository.
@@ -98,7 +96,7 @@ jobs:
           test -d ~/.android/avd/fb-base.avd/snapshots/fb_ready
 
       # ---- 2. boot snapshot -> phone exit node -> login -> backup -> Mega ----
-      - name: Boot emulator, download on runner IP, restore on phone IP
+      - name: Boot emulator, switch to phone IP, restore saved login
         env:
           PHONE_IP: ${{ env.PHONE_IP }}
           BASELINE_IP: ${{ env.BASELINE_IP }}
@@ -112,7 +110,7 @@ jobs:
           MEGA_FOLDER: facebook-android-backup
           MEGA_FILE: ${{ env.MEGA_FILE }}      # fb-session-<email>.tgz.enc, from the sheet
         run: |
-          bash scripts/run-with-emulator.sh bash scripts/restore-session.sh
+          bash scripts/run-with-emulator.sh bash -c 'timeout 300 bash scripts/use-phone-exit-node.sh && bash scripts/restore-session.sh'
 
       # First run (or after 7 idle days) comes from Mega; this saves it to the GitHub cache so every
       # next run restores it in seconds instead of downloading >1 GB from Mega again.
@@ -125,8 +123,6 @@ jobs:
             ~/.android/avd/*
             ~/.android/adb*
             /usr/local/lib/android/sdk/system-images/android-30
-            /usr/local/lib/android/sdk/emulator
-            /usr/local/lib/android/sdk/platform-tools
 
       - name: Print logs
         if: always()

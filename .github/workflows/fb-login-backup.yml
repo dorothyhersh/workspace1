@@ -22,7 +22,7 @@ env:
 jobs:
   login:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -59,6 +59,16 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # The cache archive contains /usr/local/lib/android/sdk/platform-tools, which belongs to root on the
+      # runner. tar could not utime/chmod it -> "Failed to restore" -> the 3.3 GB cache was thrown away
+      # and the artifact was downloaded again (about 3 extra minutes on EVERY run). Make it writable first.
+      - name: Make SDK dirs writable (so the cache restore does not fail)
+        run: |
+          SDK=/usr/local/lib/android/sdk
+          sudo mkdir -p $SDK/emulator $SDK/platform-tools $SDK/system-images
+          sudo chown "$(id -u):$(id -g)" $SDK
+          sudo chown -R "$(id -u):$(id -g)" $SDK/emulator $SDK/platform-tools $SDK/system-images
+
       # ---- 1. restore the emulator backup (Facebook already installed, snapshot fb_ready) ----
       - name: Restore emulator backup from cache (fast path)
         id: cache
@@ -93,8 +103,17 @@ jobs:
           ls -la ~/.android/avd/fb-base.avd/snapshots/
           test -d ~/.android/avd/fb-base.avd/snapshots/fb_ready
 
-      # ---- 2. boot snapshot -> phone exit node -> login -> backup -> Mega ----
-      - name: Boot emulator, phone IP, log in every account separately, backup to Mega, update sheet
+      # ---- 2a. phone exit node (own step: hard 4 min limit, so a stuck tailscale can never block the job) ----
+      - name: Route traffic through the phone (exit node)
+        timeout-minutes: 4
+        env:
+          PHONE_IP: ${{ env.PHONE_IP }}
+          BASELINE_IP: ${{ env.BASELINE_IP }}
+        run: timeout -k 5 200 bash scripts/use-phone-exit-node.sh
+
+      # ---- 2b. boot snapshot -> login -> backup -> Mega -> sheet ----
+      - name: Boot emulator, log in every account separately, backup to Mega, update sheet
+        timeout-minutes: 50
         env:
           PHONE_IP: ${{ env.PHONE_IP }}
           BASELINE_IP: ${{ env.BASELINE_IP }}
@@ -106,8 +125,7 @@ jobs:
           MEGA_FOLDER: facebook-android-backup
           MEGA_CONF_FOLDER: ${{ env.MEGA_CONF_FOLDER }}
           MEGA_CONF_FILE: ${{ env.MEGA_CONF_FILE }}
-        run: |
-          bash scripts/run-with-emulator.sh bash -c 'timeout 300 bash scripts/use-phone-exit-node.sh && bash scripts/login-backup.sh'
+        run: bash scripts/run-with-emulator.sh bash scripts/login-backup.sh
 
       # First run (or after 7 idle days) comes from Mega; this saves it to the GitHub cache so every
       # next run restores it in seconds instead of downloading >1 GB from Mega again.
@@ -126,7 +144,7 @@ jobs:
       - name: Print logs
         if: always()
         run: |
-          echo "=== tailscale status ==="; tailscale status || true
+          echo "=== tailscale status ==="; timeout 15 tailscale status || true
           echo "=== run.log ==="; cat artifacts/run.log 2>/dev/null || echo "no run.log"
 
       - name: Upload screenshots + log

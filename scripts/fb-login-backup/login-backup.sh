@@ -6,6 +6,11 @@
 #   - if Facebook still shows a logged-in feed after the reset, that account is refused (no backup)
 #   - all logins happen on the phone IP; at the end the phone exit node is switched OFF, every
 #     backup is uploaded to Mega, and the Mega sheet gets the backup names (BACKUP_FILE_NAME + BackupLog)
+# Every account ends with a STATUS (written to the sheet): active | suspended | wrong_password |
+# needs_attention | login_failed.  A suspended account ("Confirm you're human to use your account",
+# "account suspended/disabled/locked") is detected the moment the screen shows, gets NO backup, an EMPTY
+# BACKUP_FILE_NAME and STATUS=suspended.  Only accounts that really logged in are backed up + uploaded, and
+# a suspended / failed account never makes the workflow fail or blocks the other accounts' upload.
 # Accounts come from $ACCOUNTS_JSON (written by scripts/load-config-from-mega.py from the Mega sheet).
 set -uo pipefail
 
@@ -24,7 +29,11 @@ TMPD="${RUNNER_TEMP:-/tmp}"
 PENDING_DIR="$TMPD/pending-backups"
 PENDING_LIST="$TMPD/pending-list.tsv"
 RESULTS_TSV="$TMPD/backup-results.tsv"
-mkdir -p "$PENDING_DIR"; : > "$PENDING_LIST"; : > "$RESULTS_TSV"
+STATUS_TSV="$TMPD/account-status.tsv"       # <email> TAB <status>, one line per account that was tried
+mkdir -p "$PENDING_DIR"; : > "$PENDING_LIST"; : > "$RESULTS_TSV"; : > "$STATUS_TSV"
+LOGIN_RESULT=""                              # set by login_account: active|suspended|wrong_password|needs_attention|login_failed
+# Facebook screens that mean "this account is suspended / locked / must prove it is human"
+SUSPENDED_REGEX="confirm you.{1,6}re human|(account|profile).{0,40}(suspended|disabled|locked)|(suspended|disabled|locked).{0,30}(your|the) account|we suspended your|your account (has been|was|is) (suspended|disabled|locked|restricted)"
 
 # single-account fallback: build a one-entry list from FB_IDENTIFIER / FB_PASSWORD
 if [[ -z "$ACCOUNTS_JSON" || ! -s "$ACCOUNTS_JSON" ]]; then
@@ -41,7 +50,7 @@ finish() {
   log "exiting with code $code"
   screenshot "99-final-state.png"
   adb logcat -d > "$ARTIFACTS/logcat.txt" 2>/dev/null
-  rm -rf "$PENDING_DIR" "$PENDING_LIST" "$ACCOUNTS_JSON" "$SESSION_TMP" "$BACKUP_FILE"
+  rm -rf "$PENDING_DIR" "$PENDING_LIST" "$ACCOUNTS_JSON" "$SESSION_TMP" "$BACKUP_FILE" "$STATUS_TSV" "$RESULTS_TSV"
   exit "$code"
 }
 trap finish EXIT
@@ -160,6 +169,7 @@ backup_session() {
 
 # ---------- login of ONE account ----------
 login_account() {
+  LOGIN_RESULT="login_failed"
   phone_guard || return 1
 
   launch_app
@@ -186,46 +196,57 @@ login_account() {
   fi
 
   tap_field 0 || { shot "04-no-form.png"; log "ERROR: login form not found"; return 1; }
-  sleep 1; type_text "$FB_IDENTIFIER"; sleep 1
-  shot "05-username-entered.png"
+  sleep 0.5; type_text "$FB_IDENTIFIER"; sleep 0.5
   tap_field 1 || { log "ERROR: password field not found"; return 1; }
-  sleep 1; type_text "$FB_PASSWORD"; sleep 1
+  sleep 0.5; type_text "$FB_PASSWORD"; sleep 0.5
   shot "06-password-entered.png"   # password is masked
-  adb shell input keyevent 4 >/dev/null 2>&1; sleep 1
+  adb shell input keyevent 4 >/dev/null 2>&1; sleep 0.5
 
   phone_guard || return 1   # still on the phone IP right before submitting?
   tap_text '^Log ?in$' "" 3 || adb shell input keyevent 66
   # poll (was: fixed 15s + 10s + 3s sleeps): stop as soon as the feed, a security check or a wrong password shows
-  local t=$SECONDS bad=0 xy
-  sleep 4
+  local t=$SECONDS bad="" xy feed=0
+  sleep 3
   while (( SECONDS - t < 50 )); do
-    if ! ui_dump; then sleep 2; continue; fi
+    if ! ui_dump; then sleep 1; continue; fi
     if grep -qiE 'responding|keeps stopping|has stopped' "$UI_XML"; then dismiss_system_dialogs; continue; fi
-    if grep -qiE 'incorrect|wrong|invalid|doesn.t match' "$UI_XML"; then
-      log "WARNING: credentials look wrong"; bad=1; break
+    # suspended / "confirm you're human" -> stop right now (was: wait 50s + 6 popup rounds, then fail)
+    if ! logged_in_xml && grep -qiE "$SUSPENDED_REGEX" "$UI_XML"; then
+      log "ACCOUNT SUSPENDED: Facebook shows '$(ui_texts | cut -d' ' -f3- | grep -iE "$SUSPENDED_REGEX" | head -1)'"
+      bad="suspended"; break
+    fi
+    if grep -qiE 'incorrect|wrong password|invalid (username|password|email)|doesn.t match|password you.ve entered' "$UI_XML"; then
+      log "WARNING: credentials look wrong"; bad="wrong_password"; break
     fi
     if grep -qiE 'two-factor|authentication app|confirm it.s you|checkpoint|suspicious|secure your account' "$UI_XML"; then
-      log "WARNING: Facebook is asking for a security check / 2FA code. Complete it manually; automation stops here."; bad=1; break
+      log "WARNING: Facebook is asking for a security check / 2FA code (needs manual attention)"; bad="needs_attention"; break
     fi
     xy="$(ui_query text '^(Save|OK)$' 0 || true)"     # "Save your login info?"
-    if [[ -n "$xy" ]]; then log "tapping Save/OK at $xy"; adb shell input tap $xy; sleep 2; continue; fi
-    logged_in_xml && { log "feed detected after $((SECONDS - t))s"; break; }
-    sleep 1
+    if [[ -n "$xy" ]]; then log "tapping Save/OK at $xy"; adb shell input tap $xy; sleep 1; continue; fi
+    logged_in_xml && { log "feed detected after $((SECONDS - t))s"; feed=1; break; }
+    sleep 0.5
   done
   shot "07-after-login.png"
-  if (( bad )); then log "WARNING: not creating a backup (login needs attention)"; return 1; fi
-  post_login_prompts 6 || true
-  shot "08-after-popups.png"
+  if [[ -n "$bad" ]]; then
+    LOGIN_RESULT="$bad"; log "RESULT: $bad - not creating a backup"; return 1
+  fi
+  # feed already seen in the loop -> one quick confirmation dump instead of the old 6-round popup wait
+  if (( feed )); then sleep 1; ui_dump && logged_in_xml || feed=0; fi
+  (( feed )) || { post_login_prompts 6 || true; shot "08-after-popups.png"; }
 
-  if is_logged_in; then
+  if (( feed )) || is_logged_in; then
     log "LOGIN OK (feed is visible)"
     shot "09-feed.png"
+    LOGIN_RESULT="active"      # logged in = active, even if the backup step then has a problem
     backup_session || { log "ERROR: backup not created"; return 1; }
     return 0
   fi
   if ui_dump; then
     log "screen texts at failure: $(ui_texts | cut -d' ' -f3- | head -30 | tr '\n' '|' | cut -c1-600)"
     cp "$UI_XML" "$ARTIFACTS/${SHOT_PREFIX}ui-failure.xml" 2>/dev/null || true
+    if grep -qiE "$SUSPENDED_REGEX" "$UI_XML"; then
+      LOGIN_RESULT="suspended"; log "ACCOUNT SUSPENDED (found on the final screen)"; return 1
+    fi
   fi
   log "WARNING: feed not detected, NOT creating a backup (a good old backup is never replaced by a bad one)"
   return 1
@@ -276,26 +297,30 @@ upload_all() {
 
 # Downloads the sheet again (fresh), writes the backup names into it, uploads it back (old copy kept as .bak.xlsx)
 update_sheet() {
-  [[ -s "$RESULTS_TSV" ]] || return 0
+  [[ -s "$RESULTS_TSV" || -s "$STATUS_TSV" ]] || return 0
   local x="$TMPD/conf-update.xlsx" remote="${MEGA_REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE}"
   rclone copyto "$remote" "$x" --retries 5 -q </dev/null || { log "WARNING: cannot download the sheet from Mega"; return 1; }
   cp "$x" "$x.bak"
   rclone copyto "$x.bak" "${MEGA_REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE%.xlsx}.bak.xlsx" --retries 5 -q </dev/null &
   local bakpid=$!
-  python3 "$DIR/update-sheet-backup-names.py" "$x" "$RESULTS_TSV" || { log "WARNING: sheet update script failed"; kill $bakpid 2>/dev/null; rm -f "$x" "$x.bak"; return 1; }
+  python3 "$DIR/update-sheet-backup-names.py" "$x" "$RESULTS_TSV" "$STATUS_TSV" || { log "WARNING: sheet update script failed"; kill $bakpid 2>/dev/null; rm -f "$x" "$x.bak"; return 1; }
   wait $bakpid || log "WARNING: .bak copy of the sheet not uploaded"; rm -f "$x.bak"
   rclone copyto "$x" "$remote" --retries 5 -q </dev/null || { log "WARNING: cannot upload the updated sheet"; rm -f "$x"; return 1; }
   rm -f "$x"
-  log "Mega sheet updated: BACKUP_FILE_NAME + BackupLog"
+  log "Mega sheet updated: STATUS + BACKUP_FILE_NAME + BackupLog"
 }
 
 UPLOAD_FAILED=()
 upload_pending() {
-  [[ -s "$PENDING_LIST" ]] || { log "no backups to upload"; return 0; }
+  [[ -s "$PENDING_LIST" || -s "$STATUS_TSV" ]] || { log "nothing to upload and no status to record"; return 0; }
   switch_to_runner_ip || log "WARNING: still on the phone link, uploads may be slow"
   setup_rclone || return 1
-  rclone mkdir "$MEGA_DIR" --retries 5 </dev/null || return 1
-  upload_all
+  if [[ -s "$PENDING_LIST" ]]; then
+    rclone mkdir "$MEGA_DIR" --retries 5 </dev/null || return 1
+    upload_all
+  else
+    log "no backups to upload (no account logged in), only the statuses go to the sheet"
+  fi
   update_sheet || log "WARNING: backups are in Mega but the sheet was not updated"
 }
 
@@ -304,16 +329,24 @@ upload_pending() {
 adb devices -l
 wait_for_boot || exit 1
 settle_device
-sleep 10
+sleep 2
 dismiss_system_dialogs
 shot "00-home-screen.png"
 
-adb shell pm list packages | grep -F "$PACKAGE_NAME" \
-  || { log "ERROR: $PACKAGE_NAME is not installed in this emulator snapshot"; exit 1; }
+have_pkg=0
+for _ in $(seq 1 30); do   # right after a snapshot resume the package service can need a few more seconds
+  adb shell pm list packages 2>&1 | grep -qF "$PACKAGE_NAME" && { have_pkg=1; break; }
+  sleep 2
+done
+(( have_pkg )) || { log "ERROR: $PACKAGE_NAME is not installed in this emulator snapshot (or the package service never came up)"; exit 1; }
 log "Facebook is already installed in the restored emulator (no APK install needed)"
 
 COUNT="$(acc_count)"
-LOGIN_OK=(); LOGIN_FAILED=()
+LOGIN_OK=(); LOGIN_SUSPENDED=(); LOGIN_FAILED=(); INFRA_FAIL=0
+if (( COUNT == 0 )); then
+  log "Nothing to do: no account to log in (all rows are STATUS=suspended or have no password). Set the workflow input retry_suspended=true to try suspended ones again."
+  exit 0
+fi
 for ((n=0; n<COUNT; n++)); do
   load_account "$n"
   SHOT_PREFIX="acc$((n+1))-"
@@ -322,13 +355,28 @@ for ((n=0; n<COUNT; n++)); do
     log "ERROR: FB_IDENTIFIER / FB_PASSWORD empty for this row, skipping"; LOGIN_FAILED+=("row $((n+1))"); continue
   fi
   if (( n > 0 )); then
-    reset_clean_state || { log "ERROR: cannot reset the emulator, stopping so accounts are not mixed"; LOGIN_FAILED+=("$FB_IDENTIFIER"); break; }
+    reset_clean_state || { log "ERROR: cannot reset the emulator, stopping so accounts are not mixed"; LOGIN_FAILED+=("$FB_IDENTIFIER"); INFRA_FAIL=1; break; }
   fi
-  if login_account; then LOGIN_OK+=("$FB_IDENTIFIER"); else LOGIN_FAILED+=("$FB_IDENTIFIER"); fi
+  if login_account; then
+    LOGIN_OK+=("$FB_IDENTIFIER")
+  elif [[ "$LOGIN_RESULT" == "suspended" ]]; then
+    LOGIN_SUSPENDED+=("$FB_IDENTIFIER")
+  else
+    LOGIN_FAILED+=("$FB_IDENTIFIER")
+  fi
+  printf '%s\t%s\n' "$FB_IDENTIFIER" "${LOGIN_RESULT:-login_failed}" >> "$STATUS_TSV"
+  log "ACCOUNT RESULT: $FB_IDENTIFIER => ${LOGIN_RESULT:-login_failed}"
 done
 
 upload_pending
 
-log "SUMMARY: login+backup OK: ${LOGIN_OK[*]:-none} | login FAILED: ${LOGIN_FAILED[*]:-none} | upload FAILED: ${UPLOAD_FAILED[*]:-none}"
-(( ${#LOGIN_FAILED[@]} == 0 && ${#UPLOAD_FAILED[@]} == 0 && ${#LOGIN_OK[@]} > 0 )) || exit 1
-log "Done! All accounts logged in separately, backups uploaded to Mega and the sheet updated."
+log "SUMMARY: active+backup: ${LOGIN_OK[*]:-none} | SUSPENDED: ${LOGIN_SUSPENDED[*]:-none} | other login problems: ${LOGIN_FAILED[*]:-none} | upload FAILED: ${UPLOAD_FAILED[*]:-none}"
+for a in "${LOGIN_SUSPENDED[@]:-}"; do [[ -n "$a" ]] && echo "::warning title=Account suspended::$a is suspended (sheet STATUS=suspended, no backup)"; done
+for a in "${LOGIN_FAILED[@]:-}"; do [[ -n "$a" ]] && echo "::warning title=Login problem::$a could not log in (see screenshots)"; done
+
+# The workflow only FAILS when something that worked could not be saved (a Mega upload) or the emulator broke.
+# Suspended / wrong-password accounts are reported (warning + sheet STATUS) but never fail the run.
+if (( ${#UPLOAD_FAILED[@]} > 0 )); then log "ERROR: some backups were not uploaded"; exit 1; fi
+if (( INFRA_FAIL )); then log "ERROR: emulator problem, some accounts were not processed"; exit 1; fi
+log "Done! ${#LOGIN_OK[@]} account(s) backed up to Mega, ${#LOGIN_SUSPENDED[@]} suspended, ${#LOGIN_FAILED[@]} with other login problems; sheet updated."
+exit 0

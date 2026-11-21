@@ -13,25 +13,22 @@ tailscale status || true
 
 say "setting exit node to $PHONE_IP"
 sudo tailscale set --exit-node="$PHONE_IP" --exit-node-allow-lan-access=true || { say "ERROR: tailscale set failed"; exit 1; }
-sleep 3
+sleep 2
 
 say "tailscale status AFTER:"
 tailscale status || true
 
-say "ping to phone (2 tries):"
-tailscale ping -c 2 "$PHONE_IP" || true
-
-say "fetching public IP through the phone (up to 3 tries, 30s each)"
+say "fetching public IP through the phone (up to 3 tries, 15s each)"
 NEW_IP=""
 for i in 1 2 3; do
-  NEW_IP=$(curl -s --max-time 30 https://ifconfig.me || true)
+  NEW_IP=$(curl -s --max-time 15 https://ifconfig.me || true)
   say "try $i -> ${NEW_IP:-nothing}"
   [ -n "$NEW_IP" ] && break
-  sleep 3
+  sleep 2
 done
 say "Baseline IP: ${BASELINE_IP:-unknown}"
 say "Phone IP:    ${NEW_IP:-none}"
-say "Provider:    $(curl -s --max-time 20 "https://ipinfo.io/${NEW_IP}/org" || echo unknown)"
+# ISP/provider lookup removed - it was diagnostic only and cost an extra network round trip
 
 if [ -z "$NEW_IP" ] || [ "$NEW_IP" = "${BASELINE_IP:-}" ]; then
   say "ERROR: traffic is NOT going through the phone"

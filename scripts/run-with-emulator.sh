@@ -17,13 +17,19 @@ export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PA
 say() { echo "[$(date -u +%H:%M:%S)] [emu] $*"; }
 [ "$#" -gt 0 ] || { say "usage: run-with-emulator.sh <command...>"; exit 2; }
 
-# --- SDK pieces (the image + AVD come from the cache; emulator binary + adb are installed fresh) ---
-yes | sdkmanager --licenses >/dev/null 2>&1 || true
-say "installing emulator + platform-tools"
-sdkmanager --install emulator platform-tools --channel=0 >/dev/null 2>&1 || say "WARNING: sdkmanager install returned non-zero"
-if [ ! -d "$SDK/system-images/android-30/google_apis/x86_64" ]; then
-  say "system image missing from cache, installing"
-  sdkmanager --install 'system-images;android-30;google_apis;x86_64' --channel=0 >/dev/null 2>&1 || true
+# --- SDK pieces: once ~/.android/avd/* + the emulator/platform-tools/system-image dirs are all
+# cached together (after a rebuild with the updated cache paths), this whole block is skipped. ---
+if [ -x "$SDK/emulator/emulator" ] && [ -x "$SDK/platform-tools/adb" ] \
+   && [ -d "$SDK/system-images/android-30/google_apis/x86_64" ]; then
+  say "emulator + platform-tools + system image already present (from cache), skipping sdkmanager"
+else
+  yes | sdkmanager --licenses >/dev/null 2>&1 || true
+  say "installing emulator + platform-tools"
+  sdkmanager --install emulator platform-tools --channel=0 >/dev/null 2>&1 || say "WARNING: sdkmanager install returned non-zero"
+  if [ ! -d "$SDK/system-images/android-30/google_apis/x86_64" ]; then
+    say "system image missing from cache, installing"
+    sdkmanager --install 'system-images;android-30;google_apis;x86_64' --channel=0 >/dev/null 2>&1 || true
+  fi
 fi
 say "emulator: $(emulator -version 2>&1 | grep -i 'version' | head -1)"
 say "AVDs: $(emulator -list-avds | tr '\n' ' ')"

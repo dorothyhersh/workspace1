@@ -6,19 +6,24 @@ Every column header (row 1) becomes an environment variable of the same name, so
 per-account settings (FB_PAGE_NAME, REEL_COUNT, ...) only need a new column.
 Used columns: FB_IDENTIFIER, FB_PASSWORD, TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET, BACKUP_FILE_NAME.
 
-Usage: load-config-from-mega.py <file.xlsx> [selector] [--json accounts.json]
+Usage: load-config-from-mega.py <file.xlsx> [selector] [--json accounts.json] [--skip-suspended]
   selector  ""                 -> first row (single account)
             "a@x.com"          -> that row only
             "a@x.com,b@x.com"  -> those rows
             "all"              -> every row that has an FB_IDENTIFIER
   --json    also write ALL selected rows (every column, plus MEGA_FILE) to this file; used by
             login-backup.sh to log in several accounts in one run.
+  --skip-suspended  rows whose STATUS column says "suspended" are not put into --json (saves the
+            ~2 minutes a doomed login costs). Only applies to selector "all"/"" - an account you name
+            explicitly is always tried again.
 The first selected row is exported to $GITHUB_ENV (Tailscale keys come from it).
 """
 import json, os, re, sys, uuid
 import openpyxl
 
 args = sys.argv[1:]
+skip_suspended = "--skip-suspended" in args
+args = [a for a in args if a != "--skip-suspended"]
 json_path = None
 if "--json" in args:
     i = args.index("--json"); json_path = args[i + 1]; del args[i:i + 2]
@@ -114,10 +119,17 @@ with open(os.environ["GITHUB_ENV"], "a") as f:
     if json_path:
         f.write(f"ACCOUNTS_JSON={json_path}\n")
 
+to_run = ready
+if skip_suspended and (sel.lower() == "all" or not sel):
+    to_run = [d for d in ready if d.get("STATUS", "").strip().lower() != "suspended"]
+    for d in ready:
+        if d not in to_run:
+            print(f"skipping {d['FB_IDENTIFIER']}: STATUS=suspended (run with retry_suspended=true to try again)")
+
 if json_path:
     with open(json_path, "w") as jf:
-        json.dump(ready, jf)
+        json.dump(to_run, jf)
     os.chmod(json_path, 0o600)
 
-print(f"accounts loaded: {len(ready)} -> " + ", ".join(f"{d['FB_IDENTIFIER']} => {d['MEGA_FILE']}" for d in ready))
+print(f"accounts loaded: {len(to_run)} -> " + ", ".join(f"{d['FB_IDENTIFIER']} => {d['MEGA_FILE']}" for d in to_run))
 print("columns exported (first row):", ", ".join(exported))

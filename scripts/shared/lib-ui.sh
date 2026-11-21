@@ -30,8 +30,9 @@ wait_for_boot() {
   # manager service is actually answering ("Can't find service: package"), so confirm
   # it responds before moving on. Usually instant; only slow if it's genuinely not ready.
   local j=0
-  while (( j < 30 )); do
-    adb_sh pm list packages >/dev/null 2>&1 && return 0
+  while (( j < 90 )); do
+    # adb_sh ends in a pipe, so its exit code is useless: look at the OUTPUT (must list packages, not "Can't find service")
+    adb_sh pm list packages 2>&1 | grep -q '^package:' && return 0
     sleep 1; j=$((j+1))
   done
   log "package manager service not responding after boot"; return 1

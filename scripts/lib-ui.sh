@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lib-ui.sh - generic adb / UI helpers (sourced, not run directly)
 
-log() { printf '[fb] %s\n' "$*"; }
+log() { printf '[fb %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 adb_sh() { adb shell "$@" | tr -d '\r'; }
 
 screenshot() {
@@ -157,12 +157,13 @@ menu_profile_name() {
 
 switcher_open() { grep -qiE 'Create Facebook Page|Open Accounts Center' "$UI_XML"; }
 
-is_logged_in() {
-  ui_dump || return 1
+# pure check on the already-dumped $UI_XML (no new dump)
+logged_in_xml() {
   ! grep -qiE 'Create new account|Forgot password|Log in to Facebook' "$UI_XML" \
     && ! switcher_open \
     && grep -qiE 'Home|What.s on your mind|Notifications|Menu' "$UI_XML"
 }
+is_logged_in() { ui_dump || return 1; logged_in_xml; }
 
 # Closes the Menu screen so the feed (with the + button) is showing
 return_to_feed() {

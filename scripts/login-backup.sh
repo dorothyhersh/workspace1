@@ -108,7 +108,7 @@ post_login_prompts() {
         if [[ -n "$xy" ]]; then log "popup, tapping dismiss at $xy"; adb shell input tap $xy; handled=1; sleep 4; fi
       fi
     fi
-    [[ "$handled" == "0" ]] && { log "no prompt to tap (round $((i+1))/$rounds), waiting"; sleep 4; }
+    [[ "$handled" == "0" ]] && { log "no prompt to tap (round $((i+1))/$rounds), waiting"; sleep 2; }
   done
   return 1
 }
@@ -199,8 +199,8 @@ login_account() {
   local t=$SECONDS bad=0 xy
   sleep 4
   while (( SECONDS - t < 50 )); do
-    dismiss_system_dialogs
     if ! ui_dump; then sleep 2; continue; fi
+    if grep -qiE 'responding|keeps stopping|has stopped' "$UI_XML"; then dismiss_system_dialogs; continue; fi
     if grep -qiE 'incorrect|wrong|invalid|doesn.t match' "$UI_XML"; then
       log "WARNING: credentials look wrong"; bad=1; break
     fi
@@ -209,8 +209,8 @@ login_account() {
     fi
     xy="$(ui_query text '^(Save|OK)$' 0 || true)"     # "Save your login info?"
     if [[ -n "$xy" ]]; then log "tapping Save/OK at $xy"; adb shell input tap $xy; sleep 2; continue; fi
-    is_logged_in && { log "feed detected after $((SECONDS - t))s"; break; }
-    sleep 2
+    logged_in_xml && { log "feed detected after $((SECONDS - t))s"; break; }
+    sleep 1
   done
   shot "07-after-login.png"
   if (( bad )); then log "WARNING: not creating a backup (login needs attention)"; return 1; fi
@@ -222,6 +222,10 @@ login_account() {
     shot "09-feed.png"
     backup_session || { log "ERROR: backup not created"; return 1; }
     return 0
+  fi
+  if ui_dump; then
+    log "screen texts at failure: $(ui_texts | cut -d' ' -f3- | head -30 | tr '\n' '|' | cut -c1-600)"
+    cp "$UI_XML" "$ARTIFACTS/${SHOT_PREFIX}ui-failure.xml" 2>/dev/null || true
   fi
   log "WARNING: feed not detected, NOT creating a backup (a good old backup is never replaced by a bad one)"
   return 1

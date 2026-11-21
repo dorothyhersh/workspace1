@@ -40,7 +40,7 @@ df -h / | tail -1; free -m | sed -n 2p
 adb kill-server >/dev/null 2>&1; adb start-server >/dev/null 2>&1
 say "starting emulator (snapshot $SNAP)"
 setsid nohup emulator -avd "$AVD" -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim \
-  -camera-back none -no-metrics -snapshot "$SNAP" -no-snapshot-save -read-only -verbose >"$ELOG" 2>&1 &
+  -camera-back none -no-metrics -snapshot "$SNAP" -no-snapshot-save -verbose >"$ELOG" 2>&1 &
 EPID=$!
 
 stop_emulator() {

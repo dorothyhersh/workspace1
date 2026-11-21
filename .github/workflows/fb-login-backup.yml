@@ -77,6 +77,7 @@ jobs:
       - name: Boot emulator, log in every account separately, backup to Mega, update sheet
         timeout-minutes: 50
         env:
+          PYTHONUNBUFFERED: '1'
           PHONE_IP: ${{ env.PHONE_IP }}
           BASELINE_IP: ${{ env.BASELINE_IP }}
           EXPECTED_PHONE_IP: ${{ secrets.EXPECTED_PHONE_IP }}

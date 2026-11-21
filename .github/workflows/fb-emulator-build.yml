@@ -51,7 +51,7 @@ jobs:
           profile: pixel_6
           avd-name: fb-base
           cores: 2
-          ram-size: 3072M
+          ram-size: 2048M
           force-avd-creation: true
           emulator-boot-timeout: 600
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics -no-snapshot-save

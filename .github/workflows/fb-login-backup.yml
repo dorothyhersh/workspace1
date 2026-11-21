@@ -113,7 +113,7 @@ jobs:
           disable-animations: false
           script: |
             timeout 300 bash scripts/use-phone-exit-node.sh
-            bash dopost/login-backup.sh
+            bash scripts/login-backup.sh
 
       - name: Print logs
         if: always()

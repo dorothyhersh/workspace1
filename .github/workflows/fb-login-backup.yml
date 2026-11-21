@@ -39,7 +39,7 @@ jobs:
           REMOTE="${MEGA_REMOTE:-$(rclone listremotes | head -n1 | tr -d ':')}"
           [ -n "$REMOTE" ] || { echo "no rclone remote found in RCLONE_CONF"; exit 1; }
           rclone copyto "${REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE}" "$RUNNER_TEMP/conf.xlsx" --retries 5 -q
-          python3 scripts/load-config-from-mega.py "$RUNNER_TEMP/conf.xlsx" "$ACCOUNT"
+          python3 scripts/shared/load-config-from-mega.py "$RUNNER_TEMP/conf.xlsx" "$ACCOUNT"
           rm -f "$RUNNER_TEMP/conf.xlsx"
 
       - name: Connect to Tailscale
@@ -112,8 +112,8 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics -snapshot fb_ready -no-snapshot-save
           disable-animations: false
           script: |
-            timeout 300 bash scripts/use-phone-exit-node.sh
-            bash scripts/login-backup.sh
+            timeout 300 bash scripts/shared/use-phone-exit-node.sh
+            bash scripts/fb-login-backup/login-backup.sh
 
       - name: Print logs
         if: always()

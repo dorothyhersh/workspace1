@@ -25,7 +25,7 @@ if [ ! -d "$SDK/system-images/android-30/google_apis/x86_64" ]; then
   say "system image missing from cache, installing"
   sdkmanager --install 'system-images;android-30;google_apis;x86_64' --channel=0 >/dev/null 2>&1 || true
 fi
-say "emulator: $(emulator -version 2>/dev/null | grep -i 'emulator version' | head -1)"
+say "emulator: $(emulator -version 2>&1 | grep -i 'version' | head -1)"
 say "AVDs: $(emulator -list-avds | tr '\n' ' ')"
 emulator -list-avds | grep -qx "$AVD" || { say "ERROR: AVD '$AVD' not found (cache restore problem?)"; ls -la ~/.android/avd/ || true; exit 1; }
 say "snapshots on disk: $(ls ~/.android/avd/$AVD.avd/snapshots/ 2>/dev/null | tr '\n' ' ')"
@@ -55,7 +55,7 @@ while :; do
   if (( SECONDS - start > BOOT_TIMEOUT )); then
     say "ERROR: not booted after ${BOOT_TIMEOUT}s (adb: $(adb devices | tr '\n' ' '))"; dump_log; stop_emulator; exit 1
   fi
-  sleep 3
+  sleep 2
 done
 say "booted in $((SECONDS - start))s"
 grep -iE 'snapshot' "$ELOG" | grep -iE 'load|fail|incompat|cold|boot' | head -n 8 | cut -c1-250 | sed 's/^/[emu] log: /'

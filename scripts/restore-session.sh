@@ -56,11 +56,10 @@ log_restored_profile() {
   fi
 }
 
-# Download backup -> restore -> launch -> verify logged in. Returns 0 only when the feed is visible.
+# Restore (from an already-downloaded backup) -> launch -> verify logged in. Returns 0 only when the feed is visible.
 restore_flow() {
-  mega_download_backup || return 1
   restore_session || return 1
-  launch_app; sleep 20; dismiss_system_dialogs
+  launch_app; sleep 12; dismiss_system_dialogs
   screenshot "10-restored-launch.png"
   dismiss_popups 5; sleep 2
   screenshot "11-restored-after-dismiss.png"
@@ -89,13 +88,18 @@ trap finish EXIT
 adb devices -l
 wait_for_boot || exit 1
 settle_device
-sleep 10
-dismiss_system_dialogs
+sleep 2
 screenshot "00-home-screen.png"
 
 adb shell pm list packages | grep -F "$PACKAGE_NAME" \
   || { log "ERROR: $PACKAGE_NAME is not installed in this emulator snapshot"; exit 1; }
 
-log "restoring ${MEGA_FOLDER}/${MEGA_FILE}"
+log "downloading ${MEGA_FOLDER}/${MEGA_FILE} on the runner's own IP (fast)"
+mega_download_backup || exit 1
+
+log "switching to the phone IP before touching Facebook"
+timeout 300 bash "$DIR/use-phone-exit-node.sh" || { log "ERROR: could not switch to the phone IP, aborting (refusing to restore on the runner IP)"; exit 1; }
+
+log "restoring the session into the emulator"
 restore_flow || exit 1
 log "Done! Saved Facebook login restored."

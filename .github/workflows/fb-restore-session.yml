@@ -1,14 +1,14 @@
-name: FB - Restore saved Facebook login from Mega into the emulator (download on runner IP, restore on phone IP)
+name: FB - Restore saved Facebook logins (active accounts only, one by one) from Mega into the emulator
 
 on:
   workflow_dispatch:
     inputs:
       account:
-        description: "FB_IDENTIFIER (email) row to use from the Mega sheet. Empty = first row."
+        description: "Which accounts from the Mega sheet: all, or emails separated by commas. Only STATUS=active rows with a backup are restored (top to bottom)."
         required: false
-        default: ""
+        default: "all"
       backup_file:
-        description: "Optional: exact backup name in Mega (e.g. fb-session-<email>.20261121-003351.tgz.enc). Empty = latest, from the sheet row."
+        description: "Optional, only when ONE account is named: exact backup name in Mega (e.g. fb-session-<email>.20261121-003351.tgz.enc). Empty = latest, from the sheet row."
         required: false
         default: ""
 
@@ -25,7 +25,7 @@ env:
 jobs:
   login:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -43,10 +43,11 @@ jobs:
           REMOTE="$MEGA_REMOTE"
           rclone listremotes | grep -qx "${REMOTE}:" || { echo "remote '${REMOTE}' not found in RCLONE_CONF (found: $(rclone listremotes | tr '\n' ' '))"; exit 1; }
           rclone copyto "${REMOTE}:${MEGA_CONF_FOLDER}/${MEGA_CONF_FILE}" "$RUNNER_TEMP/conf.xlsx" --retries 5 -q
-          python3 scripts/shared/load-config-from-mega.py "$RUNNER_TEMP/conf.xlsx" "$ACCOUNT"
+          python3 scripts/shared/load-config-from-mega.py "$RUNNER_TEMP/conf.xlsx" "${ACCOUNT:-all}" --json "$RUNNER_TEMP/accounts.json" --only-active
           rm -f "$RUNNER_TEMP/conf.xlsx"
 
       - name: Connect to Tailscale
+        if: env.ACCOUNT_COUNT != '0'
         uses: tailscale/github-action@v3
         with:
           oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
@@ -54,9 +55,11 @@ jobs:
           tags: tag:ci
 
       - name: Record baseline IP (runner's own IP, before the phone)
+        if: env.ACCOUNT_COUNT != '0'
         run: echo "BASELINE_IP=$(curl -s --max-time 20 https://ifconfig.me)" | tee -a $GITHUB_ENV
 
       - name: Enable KVM
+        if: env.ACCOUNT_COUNT != '0'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
@@ -65,31 +68,33 @@ jobs:
       # ---- 1. restore the clean emulator (Facebook installed, snapshot fb_ready) from the 90-day artifact ----
       # Nothing is stored between runs except that artifact, which "FB - Build emulator + install Facebook" creates.
       - name: Restore emulator from the 90-day artifact
+        if: env.ACCOUNT_COUNT != '0'
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/shared/restore-emulator.sh
 
       # ---- 2. boot snapshot -> phone exit node -> login -> backup -> Mega ----
-      - name: Boot emulator, download on runner IP, restore on phone IP
+      - name: Boot emulator, download all backups on runner IP, restore each account on phone IP
+        if: env.ACCOUNT_COUNT != '0'
+        timeout-minutes: 50
         env:
+          PYTHONUNBUFFERED: '1'
           PHONE_IP: ${{ env.PHONE_IP }}
           BASELINE_IP: ${{ env.BASELINE_IP }}
           EXPECTED_PHONE_IP: ${{ secrets.EXPECTED_PHONE_IP }}
           PACKAGE_NAME: com.facebook.katana
-          FB_IDENTIFIER: ${{ env.FB_IDENTIFIER }}
-          FB_PASSWORD: ${{ env.FB_PASSWORD }}
+          ACCOUNTS_JSON: ${{ env.ACCOUNTS_JSON }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
           RCLONE_CONF_CONTENT: ${{ secrets.RCLONE_CONF }}
           RESTORE_FILE: ${{ github.event.inputs.backup_file }}
           MEGA_FOLDER: facebook-android-backup
-          MEGA_FILE: ${{ env.MEGA_FILE }}      # fb-session-<email>.tgz.enc, from the sheet
         run: |
           bash scripts/shared/run-with-emulator.sh bash scripts/fb-restore-session/restore-session.sh
 
       - name: Print logs
         if: always()
         run: |
-          echo "=== tailscale status ==="; tailscale status || true
+          echo "=== tailscale status ==="; timeout 15 tailscale status || true
           echo "=== run.log ==="; cat artifacts/run.log 2>/dev/null || echo "no run.log"
 
       - name: Upload screenshots + log

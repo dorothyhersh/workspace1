@@ -7,10 +7,18 @@ on:
         description: "Direct URL to the APK/zip (empty = use the zip in Mega)"
         required: false
         type: string
+      also_artifact:
+        description: "Also keep a 90-day artifact copy (cache is deleted after 7 days unused)"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
-  actions: read
+  actions: write
+
+env:
+  CACHE_PREFIX: emu-fb-api30-
 
 jobs:
   build:
@@ -43,7 +51,7 @@ jobs:
           profile: pixel_6
           avd-name: fb-base
           cores: 2
-          ram-size: 2048M
+          ram-size: 3072M
           force-avd-creation: true
           emulator-boot-timeout: 600
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics -no-snapshot-save
@@ -56,18 +64,32 @@ jobs:
           test -d ~/.android/avd/fb-base.avd/snapshots/fb_ready
           du -sh ~/.android/avd
 
-      # The emulator is kept as an artifact for 90 days (the maximum GitHub allows).
-      - name: Pack emulator (AVD + SDK emulator + system image)
-        run: |
-          mkdir -p "$RUNNER_TEMP/pack"
-          tar -C "$HOME" -cf - .android/avd | zstd -T0 -3 > "$RUNNER_TEMP/pack/avd.tar.zst"
-          tar -C /usr/local/lib/android/sdk -cf - emulator system-images/android-30 | zstd -T0 -3 > "$RUNNER_TEMP/pack/sdk.tar.zst"
-          ls -la "$RUNNER_TEMP/pack"
+      - name: Save FULL emulator backup to GitHub cache
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ env.CACHE_PREFIX }}${{ github.run_id }}
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+            /usr/local/lib/android/sdk/system-images/android-30
 
-      - name: Upload emulator artifact (kept 90 days)
+      - name: Delete older emulator caches (keep newest only)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --key "$CACHE_PREFIX" --sort created_at --order desc --limit 100 --json id --jq '.[1:] | .[] | .id' \
+          | while read -r id; do gh cache delete "$id" --repo "$GITHUB_REPOSITORY"; done
+
+      - name: Pack AVD for artifact copy
+        if: ${{ inputs.also_artifact }}
+        run: tar -C "$HOME" -cf - .android/avd | zstd -T0 -3 > "$RUNNER_TEMP/avd.tar.zst"
+
+      - name: Upload artifact copy (90 days)
+        if: ${{ inputs.also_artifact }}
         uses: actions/upload-artifact@v4
         with:
           name: emulator-backup
-          path: ${{ runner.temp }}/pack/
+          path: ${{ runner.temp }}/avd.tar.zst
           retention-days: 90
           compression-level: 0

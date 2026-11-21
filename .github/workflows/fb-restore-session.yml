@@ -17,7 +17,6 @@ permissions:
   actions: read
 
 env:
-  CACHE_PREFIX: emu-fb-api30-
   PHONE_IP: 100.85.72.32
   MEGA_CONF_FOLDER: Fbworkflow
   MEGA_CONF_FILE: login_Setup_Setting_workflow_conf.xlsx
@@ -63,39 +62,12 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      # ---- 1. restore the emulator backup (Facebook already installed, snapshot fb_ready) ----
-      - name: Restore emulator backup from cache (fast path)
-        id: cache
-        uses: actions/cache/restore@v4
-        with:
-          key: ${{ env.CACHE_PREFIX }}none
-          restore-keys: ${{ env.CACHE_PREFIX }}
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-            /usr/local/lib/android/sdk/system-images/android-30
-            /usr/local/lib/android/sdk/emulator
-            /usr/local/lib/android/sdk/platform-tools
-
-      # Cache is deleted after 7 days without use, so when it is missing the emulator comes from the
-      # 90-day artifact that "FB - Build emulator + install Facebook" saved in THIS repository.
-      # (After the run, the emulator is saved to the cache again, so the next runs are fast.)
-      - name: Cache missing -> restore emulator from the build workflow artifact
-        if: steps.cache.outputs.cache-matched-key == ''
+      # ---- 1. restore the clean emulator (Facebook installed, snapshot fb_ready) from the 90-day artifact ----
+      # Nothing is stored between runs except that artifact, which "FB - Build emulator + install Facebook" creates.
+      - name: Restore emulator from the 90-day artifact
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow fb-emulator-build.yml --status success --limit 5 --json databaseId --jq '.[0].databaseId')
-          [ -n "$RUN_ID" ] || { echo "No successful build run found - run 'FB - Build emulator + install Facebook' first (its artifact lasts 90 days)"; exit 1; }
-          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n emulator-backup -D "$RUNNER_TEMP/emu" \
-            || { echo "Artifact expired (90 days) - run 'FB - Build emulator + install Facebook' again"; exit 1; }
-          zstd -d -T0 -c "$RUNNER_TEMP/emu/avd.tar.zst" | tar -C "$HOME" -xf -
-          rm -rf "$RUNNER_TEMP/emu"
-
-      - name: Verify emulator backup is present
-        run: |
-          ls -la ~/.android/avd/fb-base.avd/snapshots/
-          test -d ~/.android/avd/fb-base.avd/snapshots/fb_ready
+        run: bash scripts/shared/restore-emulator.sh
 
       # ---- 2. boot snapshot -> phone exit node -> login -> backup -> Mega ----
       - name: Boot emulator, download on runner IP, restore on phone IP
@@ -112,21 +84,7 @@ jobs:
           MEGA_FOLDER: facebook-android-backup
           MEGA_FILE: ${{ env.MEGA_FILE }}      # fb-session-<email>.tgz.enc, from the sheet
         run: |
-          bash scripts/fb-restore-session/run-with-emulator.sh bash scripts/fb-restore-session/restore-session.sh
-
-      # First run (or after 7 idle days) comes from Mega; this saves it to the GitHub cache so every
-      # next run restores it in seconds instead of downloading >1 GB from Mega again.
-      - name: Save emulator to cache (skips the Mega download next time)
-        if: always() && steps.cache.outputs.cache-matched-key == ''
-        uses: actions/cache/save@v4
-        with:
-          key: ${{ env.CACHE_PREFIX }}${{ github.run_id }}
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-            /usr/local/lib/android/sdk/system-images/android-30
-            /usr/local/lib/android/sdk/emulator
-            /usr/local/lib/android/sdk/platform-tools
+          bash scripts/shared/run-with-emulator.sh bash scripts/fb-restore-session/restore-session.sh
 
       - name: Print logs
         if: always()

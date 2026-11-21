@@ -97,7 +97,6 @@ jobs:
 
       # ---- 2. boot snapshot -> phone exit node -> login -> backup -> Mega ----
       - name: Boot emulator, switch to phone IP, restore saved login
-        uses: reactivecircus/android-emulator-runner@v2
         env:
           PHONE_IP: ${{ env.PHONE_IP }}
           BASELINE_IP: ${{ env.BASELINE_IP }}
@@ -110,21 +109,8 @@ jobs:
           RESTORE_FILE: ${{ github.event.inputs.backup_file }}
           MEGA_FOLDER: facebook-android-backup
           MEGA_FILE: ${{ env.MEGA_FILE }}      # fb-session-<email>.tgz.enc, from the sheet
-        with:
-          api-level: 30
-          target: google_apis
-          arch: x86_64
-          profile: pixel_6
-          avd-name: fb-base
-          cores: 2
-          ram-size: 3072M
-          force-avd-creation: false
-          emulator-boot-timeout: 300
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics -snapshot fb_ready -no-snapshot-save
-          disable-animations: false
-          script: |
-            timeout 300 bash scripts/use-phone-exit-node.sh
-            bash scripts/restore-session.sh
+        run: |
+          bash scripts/run-with-emulator.sh bash -c 'timeout 300 bash scripts/use-phone-exit-node.sh && bash scripts/restore-session.sh'
 
       # First run (or after 7 idle days) comes from Mega; this saves it to the GitHub cache so every
       # next run restores it in seconds instead of downloading >1 GB from Mega again.

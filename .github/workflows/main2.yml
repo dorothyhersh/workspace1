@@ -1,0 +1,193 @@
+name: Emulator Screenshots - Infinix Smart 8 Plus Screen Profile
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Device model to show in About phone"
+        default: "Infinix Smart 8 Plus"
+      brand:
+        description: "Brand"
+        default: "Infinix"
+      manufacturer:
+        description: "Manufacturer"
+        default: "INFINIX"
+      build:
+        description: "Build number (ro.build.display.id)"
+        default: "X6526-H894ABCD-T-GL-240115V1220"
+
+jobs:
+  emulator-screenshots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DEVICE_MODEL: ${{ github.event.inputs.model || 'Infinix Smart 8 Plus' }}
+      DEVICE_BRAND: ${{ github.event.inputs.brand || 'Infinix' }}
+      DEVICE_MANUF: ${{ github.event.inputs.manufacturer || 'INFINIX' }}
+      DEVICE_BUILD: ${{ github.event.inputs.build || 'X6526-H894ABCD-T-GL-240115V1220' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install scrcpy
+        run: |
+          mkdir -p "$HOME/scrcpy"
+          URL=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
+            https://api.github.com/repos/Genymobile/scrcpy/releases/latest \
+            | grep -o 'https://[^"]*scrcpy-linux-x86_64-[^"]*\.tar\.gz' | head -n1)
+          echo "Downloading: $URL"
+          [ -n "$URL" ] || { echo "No linux release asset found"; exit 1; }
+          curl -sL "$URL" | tar -xz -C "$HOME/scrcpy" --strip-components=1
+          ls -l "$HOME/scrcpy"
+          echo "$HOME/scrcpy" >> "$GITHUB_PATH"
+          "$HOME/scrcpy/scrcpy" --version
+
+      - name: Create set-model script
+        run: |
+          mkdir -p scripts
+          cat > scripts/set-model.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -uo pipefail
+
+          MODEL="${1:-Infinix Smart 8 Plus}"
+          BRAND="${2:-Infinix}"
+          MANUF="${3:-INFINIX}"
+          BUILD="${4:-}"
+
+          wait_boot() {
+            sleep 5
+            adb wait-for-device
+            local n=0
+            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+              sleep 2; n=$((n+1)); [ "$n" -gt 120 ] && { echo "boot timeout"; return 1; }
+            done
+            sleep 5
+          }
+
+          echo "== Patching model to: $MODEL / $BRAND / $MANUF / build: ${BUILD:-<unchanged>} =="
+
+          BUILD_SED=""
+          if [ -n "$BUILD" ]; then
+            BUILD_SED="-e 's|^(ro\.([a-z_]+\.)?build\.display\.id)=.*|\1=${BUILD}|'"
+          fi
+
+          cat > /tmp/patch.sh <<EOF
+          for f in \$(find /system /system_ext /product /vendor /odm -maxdepth 3 -type f -name build.prop 2>/dev/null); do
+            sed -i -E \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?model)=.*|\1=${MODEL}|' \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?brand)=.*|\1=${BRAND}|' \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?manufacturer)=.*|\1=${MANUF}|' \\
+              ${BUILD_SED} \\
+              "\$f"
+            grep -H -E '^ro\.product\.([a-z_]+\.)?(model|brand|manufacturer)=|^ro\.([a-z_]+\.)?build\.display\.id=' "\$f"
+          done
+          echo "source_order: \$(getprop ro.product.property_source_order)"
+          EOF
+
+          adb root; sleep 3
+          adb disable-verity
+          adb reboot; wait_boot || exit 1
+          adb root; sleep 3
+          adb remount || { echo "remount failed"; exit 1; }
+
+          adb push /tmp/patch.sh /data/local/tmp/patch.sh
+          echo "== Files patched =="
+          adb shell sh /data/local/tmp/patch.sh
+
+          adb reboot; wait_boot || exit 1
+
+          echo "== Result =="
+          adb shell getprop ro.product.model
+          adb shell getprop ro.product.brand
+          adb shell getprop ro.product.manufacturer
+          adb shell getprop ro.build.display.id
+          SCRIPT
+          chmod +x scripts/set-model.sh
+
+      - name: Start Emulator + Take Screenshots
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          ram-size: 4096M
+          disk-size: 8G
+          cores: 2
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -no-metrics -writable-system
+          disable-animations: true
+          script: |
+            mkdir -p screenshots
+            bash scripts/set-model.sh "$DEVICE_MODEL" "$DEVICE_BRAND" "$DEVICE_MANUF" "$DEVICE_BUILD" > screenshots/set_model_log.txt 2>&1 || echo "Model patch failed, continuing with default model"
+            cat screenshots/set_model_log.txt
+            adb shell "settings put global device_name '$DEVICE_MODEL'" || echo "device_name failed"
+
+            adb shell settings put secure immersive_mode_confirmations confirmed
+            adb shell settings put global policy_control immersive.full=*
+            adb shell settings put global policy_control null
+            adb shell settings put secure show_ime_with_hard_keyboard 0
+            adb shell wm size 720x1612
+            adb shell wm density 270
+            sleep 10
+
+            SDL_VIDEODRIVER=dummy nohup scrcpy -s emulator-5554 --no-playback --no-audio --no-control --max-size=1024 --video-bit-rate=4M --record=screenshots/session.mkv --record-format=mkv > screenshots/scrcpy_log.txt 2>&1 &
+            sleep 5
+            cat screenshots/scrcpy_log.txt
+
+            adb shell input keyevent KEYCODE_WAKEUP
+            adb shell input keyevent 82
+            adb shell input keyevent KEYCODE_HOME
+            sleep 8
+            adb exec-out screencap -p > screenshots/01_home.png
+
+            adb shell am start -a android.settings.SETTINGS
+            sleep 8
+            adb exec-out screencap -p > screenshots/02_settings.png
+
+            adb shell am start -a android.settings.DEVICE_INFO_SETTINGS
+            sleep 8
+            adb exec-out screencap -p > screenshots/03_about_phone_top.png
+
+            adb shell input swipe 360 1300 360 500 400
+            sleep 3
+            adb exec-out screencap -p > screenshots/04_about_phone_scrolled.png
+
+            adb shell input swipe 360 1300 360 500 400
+            sleep 3
+            adb exec-out screencap -p > screenshots/05_about_phone_scrolled_more.png
+
+            adb shell am start -a android.settings.DISPLAY_SETTINGS
+            sleep 6
+            adb exec-out screencap -p > screenshots/06_display_settings.png
+
+            pkill -INT -x scrcpy || echo "scrcpy was not running"
+            sleep 5
+
+            adb shell wm size > screenshots/display_info.txt
+            adb shell wm density >> screenshots/display_info.txt
+            adb shell getprop > screenshots/all_props.txt
+            adb shell getprop ro.product.model > screenshots/model.txt
+            adb shell getprop ro.product.brand >> screenshots/model.txt
+            adb shell getprop ro.product.manufacturer >> screenshots/model.txt
+            adb shell getprop ro.build.display.id >> screenshots/model.txt
+            adb shell getprop ro.build.version.release >> screenshots/model.txt
+
+            ls -l screenshots
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-screenshots
+          path: screenshots/
+          if-no-files-found: warn
+          retention-days: 7

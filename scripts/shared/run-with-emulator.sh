@@ -36,10 +36,37 @@ emulator -list-avds | grep -qx "$AVD" || { say "ERROR: AVD '$AVD' not found (art
 say "snapshots on disk: $(ls ~/.android/avd/$AVD.avd/snapshots/ 2>/dev/null | tr '\n' ' ')"
 df -h / | tail -1; free -m | sed -n 2p
 
+# --- virtual sound card, so the emulator's audio (captcha "play audio") can be recorded ---
+# PulseAudio null sink "emu_out": the emulator plays into it, login-backup.sh records emu_out.monitor.
+# Switch off with CAPTURE_CAPTCHA_AUDIO=0 (then the emulator starts with -noaudio exactly as before).
+AUDIO_OK=0; AUDIO_SINK="emu_out"; AUDIO_ARGS=(-noaudio)
+setup_audio() {
+  if ! command -v pulseaudio >/dev/null 2>&1 || ! command -v parecord >/dev/null 2>&1 || ! command -v ffmpeg >/dev/null 2>&1; then
+    say "installing pulseaudio + ffmpeg"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pulseaudio pulseaudio-utils ffmpeg >/dev/null 2>&1 \
+      || { say "WARNING: could not install pulseaudio/ffmpeg"; return 1; }
+  fi
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(id -u)}"
+  mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
+  pulseaudio --check 2>/dev/null || pulseaudio -D --exit-idle-time=-1 --log-target="file:$ART/pulseaudio.log" || { say "WARNING: pulseaudio did not start"; return 1; }
+  sleep 2
+  pactl load-module module-null-sink sink_name="$AUDIO_SINK" sink_properties=device.description="$AUDIO_SINK" >/dev/null 2>&1 || true
+  pactl set-default-sink "$AUDIO_SINK" >/dev/null 2>&1 || true
+  pactl list short sinks 2>/dev/null | grep -q "$AUDIO_SINK" || { say "WARNING: null sink '$AUDIO_SINK' missing"; return 1; }
+  say "virtual sound card ready: $AUDIO_SINK"
+}
+if [ "${CAPTURE_CAPTCHA_AUDIO:-1}" = "1" ] && setup_audio; then
+  AUDIO_OK=1; AUDIO_ARGS=()
+  export QEMU_AUDIO_DRV=pa
+  # headless emulators may need this flag to use host audio; only added if this emulator build knows it
+  emulator -help 2>&1 | grep -q -- '-allow-host-audio' && AUDIO_ARGS=(-allow-host-audio)
+fi
+export AUDIO_OK AUDIO_SINK
+
 # --- start emulator ---
 adb kill-server >/dev/null 2>&1; adb start-server >/dev/null 2>&1
 say "starting emulator (snapshot $SNAP)"
-setsid nohup emulator -avd "$AVD" -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim \
+setsid nohup emulator -avd "$AVD" -no-window -gpu swiftshader_indirect "${AUDIO_ARGS[@]}" -no-boot-anim \
   -camera-back none -no-metrics -snapshot "$SNAP" -no-snapshot-save -verbose >"$ELOG" 2>&1 &
 EPID=$!
 

@@ -17,16 +17,24 @@ on:
       build:
         description: "Build number (ro.build.display.id)"
         default: "X6526-H894ABCD-T-GL-240115V1220"
+      live:
+        description: "Keep emulator alive for live scrcpy view (true/false)"
+        default: "true"
+      live_minutes:
+        description: "Max minutes to keep it alive (max 340)"
+        default: "340"
 
 jobs:
   emulator-screenshots:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 360
     env:
       DEVICE_MODEL: ${{ github.event.inputs.model || 'Infinix Smart 8 Plus' }}
       DEVICE_BRAND: ${{ github.event.inputs.brand || 'Infinix' }}
       DEVICE_MANUF: ${{ github.event.inputs.manufacturer || 'INFINIX' }}
       DEVICE_BUILD: ${{ github.event.inputs.build || 'X6526-H894ABCD-T-GL-240115V1220' }}
+      LIVE: ${{ github.event.inputs.live || 'false' }}
+      LIVE_MINUTES: ${{ github.event.inputs.live_minutes || '340' }}
 
     steps:
       - name: Checkout
@@ -50,6 +58,26 @@ jobs:
           ls -l "$HOME/scrcpy"
           echo "$HOME/scrcpy" >> "$GITHUB_PATH"
           "$HOME/scrcpy/scrcpy" --version
+
+      - name: Join Tailscale (live view)
+        if: env.LIVE == 'true'
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: gh-emulator
+
+      - name: Prepare SSH access (live view)
+        if: env.LIVE == 'true'
+        run: |
+          sudo apt-get install -y openssh-server > /dev/null
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.LIVE_SSH_PUBKEY }}" >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          sudo systemctl start ssh || sudo service ssh start
+          echo "=============================================="
+          echo "Runner Tailscale IP: $(tailscale ip -4 | head -n1)"
+          echo "On Lubuntu run:  ~/live-scrcpy.sh $(tailscale ip -4 | head -n1)"
+          echo "=============================================="
 
       - name: Create set-model script
         run: |
@@ -182,6 +210,8 @@ jobs:
             adb shell getprop ro.build.version.release >> screenshots/model.txt
 
             ls -l screenshots
+
+            if [ "$LIVE" = "true" ]; then adb shell svc power stayon true; echo "LIVE NOW -> runner@$(tailscale ip -4 | head -n1)  (run ~/live-scrcpy.sh on Lubuntu)"; m=$LIVE_MINUTES; [ "$m" -gt 340 ] && m=340; end=$(( $(date +%s) + m * 60 )); while [ ! -f /tmp/stop-live ] && [ "$(date +%s)" -lt "$end" ]; do sleep 20; done; fi
 
       - name: Upload Screenshots
         if: always()

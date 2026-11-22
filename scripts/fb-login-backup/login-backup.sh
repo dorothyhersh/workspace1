@@ -138,6 +138,7 @@ need_root() {
 # Retried 3x; only "adb emu avd snapshot load" is used (never pm clear).
 load_snapshot() {
   local out try
+  [[ "${COLD_BOOT:-0}" == "1" ]] && { log "cold-boot mode: there is no usable snapshot to load"; return 1; }
   for try in 1 2 3; do
     out="$(timeout 180 adb emu avd snapshot load "$SNAPSHOT_NAME" 2>&1 | tr -d '\r')"
     log "snapshot load (try $try/3): $(printf '%s' "$out" | tr '\n' ' ' | head -c 200)"
@@ -408,6 +409,9 @@ for ((n=0; n<COUNT; n++)); do
   log "===== account $((n+1))/$COUNT: $FB_IDENTIFIER  ->  backup file: ${MEGA_FOLDER}/${MEGA_FILE} ====="
   if [[ -z "${FB_IDENTIFIER:-}" || -z "${FB_PASSWORD:-}" ]]; then
     log "ERROR: FB_IDENTIFIER / FB_PASSWORD empty for this row, skipping"; LOGIN_FAILED+=("row $((n+1))"); continue
+  fi
+  if (( n > 0 )) && [[ "${COLD_BOOT:-0}" == "1" ]]; then
+    log "WARNING: emulator was cold-booted (snapshot broken), cannot reset to a clean app state - leaving the remaining accounts for the next run"; break
   fi
   if (( n > 0 )); then
     reset_clean_state || { log "ERROR: cannot reset the emulator, stopping so accounts are not mixed"; LOGIN_FAILED+=("$FB_IDENTIFIER"); INFRA_FAIL=1; break; }

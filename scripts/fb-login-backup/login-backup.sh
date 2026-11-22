@@ -132,17 +132,20 @@ need_root() {
 # ONLY "adb emu avd snapshot load" is used (no pm clear). If a load fails it is retried; if all tries fail
 # the function returns 1 and the run stops, so accounts are never mixed.
 reset_clean_state() {
-  log "resetting the emulator to the clean '$SNAPSHOT_NAME' snapshot"
+  log "loading the clean '$SNAPSHOT_NAME' snapshot"
   local out try ok=0
   for try in 1 2 3; do
     out="$(timeout 120 adb emu avd snapshot load "$SNAPSHOT_NAME" 2>&1 | tr -d '\r')"
     log "snapshot load (try $try/3): $(printf '%s' "$out" | tr '\n' ' ' | head -c 200)"
-    if grep -q '^OK' <<<"$out"; then ok=1; break; fi
+    if grep -q '^OK' <<<"$out"; then
+      sleep 2; timeout 20 adb reconnect >/dev/null 2>&1; adb wait-for-device
+      # the package service must answer after the load, otherwise load the snapshot again
+      if wait_for_boot; then ok=1; break; fi
+      log "emulator not ready after snapshot load (try $try/3), loading the snapshot again"
+    fi
     sleep 5
   done
-  (( ok )) || { log "ERROR: snapshot load '$SNAPSHOT_NAME' failed 3 times"; return 1; }
-  sleep 2; timeout 20 adb reconnect >/dev/null 2>&1; adb wait-for-device
-  wait_for_boot || return 1
+  (( ok )) || { log "ERROR: snapshot '$SNAPSHOT_NAME' could not be loaded into a working emulator (3 tries)"; return 1; }
   settle_device; sleep 2
   dismiss_system_dialogs
   adb shell pm list packages | grep -qF "$PACKAGE_NAME" || { log "ERROR: $PACKAGE_NAME missing after reset"; return 1; }
@@ -331,7 +334,12 @@ upload_pending() {
 # ===================== MAIN =====================
 [[ -n "${BACKUP_PASSPHRASE:-}" ]] || { log "ERROR: BACKUP_PASSPHRASE secret is empty"; exit 1; }
 adb devices -l
-wait_for_boot || exit 1
+if ! wait_for_boot; then
+  # snapshot resume sometimes comes up with a dead package service (seen: "package manager service not
+  # responding after boot"): same fix as between accounts, load the clean snapshot again
+  log "emulator not ready after the first boot, loading snapshot '$SNAPSHOT_NAME' again"
+  reset_clean_state || exit 1
+fi
 settle_device
 sleep 2
 dismiss_system_dialogs

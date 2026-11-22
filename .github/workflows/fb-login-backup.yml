@@ -95,7 +95,7 @@ jobs:
           MEGA_FOLDER: facebook-android-backup
           MEGA_CONF_FOLDER: ${{ env.MEGA_CONF_FOLDER }}
           MEGA_CONF_FILE: ${{ env.MEGA_CONF_FILE }}
-          CAPTURE_CAPTCHA_AUDIO: '1'      # 1 = on captcha: tap play audio + record audio/screen. 0 = off
+          CAPTURE_CAPTCHA_AUDIO: '0'      # 0 = off (old behaviour, -noaudio). 1 = needs a snapshot built WITH audio
           CAPTCHA_AUDIO_SECONDS: '20'     # seconds recorded after tapping play audio
         run: bash scripts/shared/run-with-emulator.sh bash scripts/fb-login-backup/login-backup.sh
 

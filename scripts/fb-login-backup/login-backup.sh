@@ -18,7 +18,7 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/../shared/config.sh"
 exec > >(tee -a "$ARTIFACTS/run.log") 2>&1
-for f in lib-ui lib-mega; do source "$DIR/../shared/$f.sh"; done
+for f in lib-ui lib-mega lib-captcha; do source "$DIR/../shared/$f.sh"; done
 
 ACCOUNTS_JSON="${ACCOUNTS_JSON:-}"
 MEGA_KEEP="${MEGA_KEEP:-10}"
@@ -262,8 +262,10 @@ login_account() {
     if grep -qiE "couldn.t find an account|find an account that matches|no account (found|matches)" "$UI_XML"; then
       log "WARNING: Facebook does not know this email/phone (account not found or wrong login)"; bad="wrong_password"; break
     fi
-    if grep -qiE 'Enter the characters you see|real human behind this login' "$UI_XML"; then
-      log "WARNING: Facebook shows a captcha (Enter the characters you see) - needs manual attention"; bad="needs_attention"; break
+    if grep -qiE "$CAPTCHA_REGEX" "$UI_XML"; then
+      log "WARNING: Facebook shows a text captcha - recording the audio version, needs manual attention"
+      capture_captcha_audio || log "WARNING: captcha audio capture did not work"
+      bad="needs_attention"; break
     fi
     if grep -qiE 'incorrect|wrong password|invalid (username|password|email)|doesn.t match|password you.ve entered' "$UI_XML"; then
       log "WARNING: credentials look wrong"; bad="wrong_password"; break

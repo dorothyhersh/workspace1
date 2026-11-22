@@ -1,8 +1,6 @@
 name: Emulator Screenshots - Infinix Smart 8 Plus Screen Profile
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
       model:
@@ -20,6 +18,9 @@ on:
       apk_folder:
         description: "Mega folder with the Facebook APK files (or a zip)"
         default: "facebook-apk"
+      refresh_apks:
+        description: "Ignore cache and re-download APKs from Mega (true/false)"
+        default: "false"
       live:
         description: "Keep emulator alive for live scrcpy view (true/false)"
         default: "true"
@@ -38,7 +39,8 @@ jobs:
       DEVICE_BUILD: ${{ github.event.inputs.build || 'X6526-H894ABCD-T-GL-240115V1220' }}
       MEGA_REMOTE: mega
       MEGA_APK_FOLDER: ${{ github.event.inputs.apk_folder || 'facebook-apk' }}
-      LIVE: ${{ github.event.inputs.live || 'false' }}
+      REFRESH_APKS: ${{ github.event.inputs.refresh_apks || 'false' }}
+      LIVE: ${{ github.event.inputs.live || 'true' }}
       LIVE_MINUTES: ${{ github.event.inputs.live_minutes || '340' }}
       # Make scrcpy use the SDK adb (same one the emulator runner uses)
       ADB: /usr/local/lib/android/sdk/platform-tools/adb
@@ -53,7 +55,18 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - name: Restore APK cache
+        id: apkcache
+        if: env.REFRESH_APKS != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: apks
+          key: facebook-apks-${{ env.MEGA_APK_FOLDER }}-${{ github.run_id }}
+          restore-keys: |
+            facebook-apks-${{ env.MEGA_APK_FOLDER }}-
+
       - name: Setup rclone (Mega)
+        if: steps.apkcache.outputs.cache-matched-key == ''
         env:
           RCLONE_CONF_DATA: ${{ secrets.RCLONE_CONF }}
         run: |
@@ -70,6 +83,8 @@ jobs:
           rclone listremotes
 
       - name: Download Facebook APKs from Mega
+        id: download
+        if: steps.apkcache.outputs.cache-matched-key == ''
         run: |
           set -e
           echo "Folder contents:"
@@ -89,6 +104,27 @@ jobs:
           echo "== APK files found =="
           find . -type f -name '*.apk' | sort
           [ -n "$(find . -type f -name '*.apk')" ] || { echo "No .apk files found (see file list above)"; exit 1; }
+
+      - name: Save APK cache
+        if: steps.apkcache.outputs.cache-matched-key == '' && steps.download.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: apks
+          key: facebook-apks-${{ env.MEGA_APK_FOLDER }}-${{ github.run_id }}
+
+      - name: Upload APKs as artifact (downloadable copy)
+        if: steps.apkcache.outputs.cache-matched-key == '' && steps.download.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: facebook-apks
+          path: apks/
+          retention-days: 7
+
+      - name: Verify APKs are present
+        run: |
+          set -e
+          find apks -type f -name '*.apk' | sort
+          [ -n "$(find apks -type f -name '*.apk')" ] || { echo "No .apk files in apks/"; exit 1; }
 
       - name: Install scrcpy (without its bundled adb)
         run: |
@@ -125,6 +161,69 @@ jobs:
           echo "Runner Tailscale IP: $(tailscale ip -4 | head -n1)"
           echo "On Lubuntu run:  ~/live-scrcpy.sh $(tailscale ip -4 | head -n1)"
           echo "=============================================="
+          {
+            echo "### Live view"
+            echo "Runner Tailscale IP: \`$(tailscale ip -4 | head -n1)\`"
+            echo ""
+            echo "Wait for the emulator step to print **LIVE NOW**, then on Lubuntu:"
+            echo '```'
+            echo "ssh -N -L 5555:127.0.0.1:5555 runner@$(tailscale ip -4 | head -n1) &"
+            echo "adb kill-server; adb connect 127.0.0.1:5555"
+            echo "scrcpy -s 127.0.0.1:5555 --max-size=1024 --max-fps=20"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create helper library (emulator restart + boot wait)
+        run: |
+          mkdir -p scripts
+          cat > scripts/lib.sh <<'LIB'
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          AVD_NAME="${AVD_NAME:-test}"
+          EMU_OPTS="-no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -no-metrics -memory 4096 -cores 4"
+
+          emulator_alive() { pgrep -f "qemu-system" >/dev/null 2>&1; }
+
+          # Start (or restart) the emulator ourselves, so we do not depend on
+          # the emulator surviving "adb reboot" or the first boot of the runner action
+          start_emulator() {
+            mkdir -p screenshots
+            echo "== (re)starting emulator '$AVD_NAME' =="
+            pkill -f "qemu-system" 2>/dev/null || true
+            sleep 3
+            adb start-server >/dev/null 2>&1 || true
+            nohup setsid "$SDK/emulator/emulator" -avd "$AVD_NAME" -port 5554 $EMU_OPTS \
+              >> screenshots/emulator_relaunch.log 2>&1 &
+            sleep 10
+          }
+
+          # Wait until the device is online AND booted; restart the emulator if it never shows up
+          wait_boot() {
+            local n=0 relaunched=0
+            sleep 8
+            until [ "$(adb get-state 2>/dev/null | tr -d '\r')" = "device" ]; do
+              adb reconnect offline >/dev/null 2>&1 || true
+              sleep 3; n=$((n+1))
+              if [ "$n" -ge 20 ] && [ "$relaunched" = 0 ]; then
+                echo "device not online after 60s (emulator alive: $(emulator_alive && echo yes || echo no)) -> restarting emulator"
+                start_emulator; relaunched=1; n=0
+              fi
+              [ "$n" -gt 80 ] && { echo "device never came online"; return 1; }
+            done
+            n=0
+            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+              sleep 2; n=$((n+1))
+              [ "$n" -gt 150 ] && { echo "boot timeout"; return 1; }
+            done
+            sleep 5
+          }
+
+          reboot_device() {
+            adb reboot
+            sleep 15
+            emulator_alive || start_emulator
+            wait_boot
+          }
+          LIB
 
       - name: Create set-model script
         run: |
@@ -138,23 +237,7 @@ jobs:
           MANUF="${3:-INFINIX}"
           BUILD="${4:-}"
 
-          # Wait until the device is really back online after a reboot
-          # (adb wait-for-device is not enough: it often stays "offline")
-          wait_boot() {
-            sleep 8
-            local n=0
-            until [ "$(adb get-state 2>/dev/null | tr -d '\r')" = "device" ]; do
-              adb reconnect offline >/dev/null 2>&1 || true
-              sleep 3; n=$((n+1))
-              [ "$n" -gt 60 ] && { echo "device never came online"; return 1; }
-            done
-            n=0
-            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
-              sleep 2; n=$((n+1))
-              [ "$n" -gt 120 ] && { echo "boot timeout"; return 1; }
-            done
-            sleep 5
-          }
+          source "$(dirname "$0")/lib.sh"
 
           echo "== Patching model to: $MODEL / $BRAND / $MANUF / build: ${BUILD:-<unchanged>} =="
 
@@ -176,9 +259,10 @@ jobs:
           echo "source_order: \$(getprop ro.product.property_source_order)"
           EOF
 
+          wait_boot || exit 1
           adb root; sleep 3
           adb disable-verity
-          adb reboot; wait_boot || exit 1
+          reboot_device || exit 1
           adb root; sleep 3
           adb remount || { echo "remount failed"; exit 1; }
 
@@ -186,7 +270,7 @@ jobs:
           echo "== Files patched =="
           adb shell sh /data/local/tmp/patch.sh
 
-          adb reboot; wait_boot || exit 1
+          reboot_device || exit 1
 
           echo "== Result =="
           adb shell getprop ro.product.model
@@ -204,6 +288,7 @@ jobs:
           #!/usr/bin/env bash
           set -u
           mkdir -p screenshots
+          source "$(dirname "$0")/lib.sh"
 
           # Make sure the device is online before every phase
           ensure_online() {
@@ -214,6 +299,9 @@ jobs:
               [ "$n" -gt 40 ] && { echo "device still offline"; return 1; }
             done
           }
+
+          # Make sure an emulator is really running (restarts it if the runner's one died)
+          wait_boot || echo "emulator did not come up"
 
           bash scripts/set-model.sh "$DEVICE_MODEL" "$DEVICE_BRAND" "$DEVICE_MANUF" "$DEVICE_BUILD" > screenshots/set_model_log.txt 2>&1 || echo "Model patch failed, continuing with default model"
           cat screenshots/set_model_log.txt
@@ -317,10 +405,11 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
+          avd-name: test
           ram-size: 4096M
           disk-size: 8G
           cores: 4
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -no-metrics -writable-system
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -no-metrics
           disable-animations: true
           script: bash scripts/run-session.sh
 

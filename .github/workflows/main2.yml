@@ -18,6 +18,9 @@ on:
       apk_folder:
         description: "Mega folder with the Facebook APK files (or a zip)"
         default: "facebook-apk"
+      mega_link:
+        description: "Optional: public mega.nz folder/file link (used instead of rclone)"
+        default: ""
       refresh_apks:
         description: "Ignore cache and re-download APKs from Mega (true/false)"
         default: "false"
@@ -39,6 +42,7 @@ jobs:
       DEVICE_BUILD: ${{ github.event.inputs.build || 'X6526-H894ABCD-T-GL-240115V1220' }}
       MEGA_REMOTE: mega
       MEGA_APK_FOLDER: ${{ github.event.inputs.apk_folder || 'facebook-apk' }}
+      MEGA_LINK: ${{ github.event.inputs.mega_link || '' }}
       REFRESH_APKS: ${{ github.event.inputs.refresh_apks || 'false' }}
       LIVE: ${{ github.event.inputs.live || 'true' }}
       LIVE_MINUTES: ${{ github.event.inputs.live_minutes || '340' }}
@@ -65,8 +69,18 @@ jobs:
           restore-keys: |
             facebook-apks-${{ env.MEGA_APK_FOLDER }}-
 
+      - name: Decide if download is needed
+        id: need
+        run: |
+          need=true
+          if [ -n "${{ steps.apkcache.outputs.cache-matched-key }}" ] && [ -n "$(find apks -type f -name '*.apk' 2>/dev/null | head -n1)" ]; then
+            need=false
+          fi
+          echo "need=$need" >> "$GITHUB_OUTPUT"
+          echo "Download needed: $need"
+
       - name: Setup rclone (Mega)
-        if: steps.apkcache.outputs.cache-matched-key == ''
+        if: steps.need.outputs.need == 'true'
         env:
           RCLONE_CONF_DATA: ${{ secrets.RCLONE_CONF }}
         run: |
@@ -80,40 +94,78 @@ jobs:
           printf '%s\n' "$RCLONE_CONF_DATA" > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
           [ -s ~/.config/rclone/rclone.conf ] || { echo "RCLONE_CONF secret is empty"; exit 1; }
+          echo "Remotes in config:"
           rclone listremotes
+          rclone listremotes | grep -q "^${MEGA_REMOTE}:$" || { echo "Remote '${MEGA_REMOTE}:' not found in RCLONE_CONF (section must be [${MEGA_REMOTE}])"; exit 1; }
 
       - name: Download Facebook APKs from Mega
         id: download
-        if: steps.apkcache.outputs.cache-matched-key == ''
+        if: steps.need.outputs.need == 'true'
         run: |
-          set -e
-          echo "Folder contents:"
-          rclone lsf "${MEGA_REMOTE}:${MEGA_APK_FOLDER}"
-          mkdir -p "$GITHUB_WORKSPACE/apks"
-          rclone copy "${MEGA_REMOTE}:${MEGA_APK_FOLDER}" "$GITHUB_WORKSPACE/apks" \
-            --include "*.apk" --include "*.zip" --include "*.xapk" --include "*.apks" --include "*.apkm" \
-            --transfers 4 --stats 15s -v
-          cd "$GITHUB_WORKSPACE/apks"
+          set -u
+          DEST="$GITHUB_WORKSPACE/apks"
+          rm -rf "$DEST"; mkdir -p "$DEST"
+
+          if [ -n "${MEGA_LINK:-}" ]; then
+            echo "== Using public Mega link via megatools =="
+            sudo apt-get install -y megatools > /dev/null
+            for try in 1 2 3; do
+              megadl --path "$DEST" "$MEGA_LINK" && break
+              echo "megadl failed (try $try), waiting 30s"; sleep 30
+            done
+          else
+            echo "== Mega account root =="
+            rclone lsd "${MEGA_REMOTE}:" 2>&1 | head -n 30 || true
+            echo "== Folder contents: ${MEGA_APK_FOLDER} =="
+            rclone lsf -R "${MEGA_REMOTE}:${MEGA_APK_FOLDER}" 2>&1 | head -n 50 || true
+
+            for try in 1 2 3; do
+              rclone copy "${MEGA_REMOTE}:${MEGA_APK_FOLDER}" "$DEST" \
+                --include "*.apk" --include "*.zip" --include "*.xapk" --include "*.apks" --include "*.apkm" \
+                --transfers 2 --retries 5 --low-level-retries 20 --stats 15s -v && break
+              echo "rclone copy failed (try $try), waiting 30s"; sleep 30
+            done
+
+            # Fallback: fetch facebook.zip directly by name
+            if [ -z "$(find "$DEST" -type f | head -n1)" ]; then
+              echo "== Fallback: copying facebook.zip directly =="
+              rclone copyto "${MEGA_REMOTE}:${MEGA_APK_FOLDER}/facebook.zip" "$DEST/facebook.zip" \
+                --retries 5 --low-level-retries 20 --stats 15s -v || true
+            fi
+          fi
+
+          cd "$DEST"
+          echo "== Downloaded =="
+          find . -type f -exec ls -lh {} \;
+          [ -n "$(find . -type f | head -n1)" ] || { echo "ERROR: nothing was downloaded from Mega. Check RCLONE_CONF, the folder name, and Mega transfer quota (see log above)."; exit 1; }
+
           for z in *.zip *.xapk *.apks *.apkm; do
             [ -e "$z" ] || continue
+            echo "Testing $z"
+            unzip -tq "$z" > /dev/null || { echo "ERROR: $z is corrupt/incomplete (download was cut off - run again)"; exit 1; }
             echo "Unzipping $z"
             unzip -oq "$z" -d "extracted_${z%.*}"
           done
-          echo "== All files =="
-          find . -type f -exec ls -lh {} \;
+
+          # unzip nested archives one level deeper if needed
+          for z in $(find . -mindepth 2 -type f \( -name '*.zip' -o -name '*.xapk' -o -name '*.apks' -o -name '*.apkm' \)); do
+            echo "Unzipping nested $z"
+            unzip -oq "$z" -d "${z%.*}_x"
+          done
+
           echo "== APK files found =="
           find . -type f -name '*.apk' | sort
-          [ -n "$(find . -type f -name '*.apk')" ] || { echo "No .apk files found (see file list above)"; exit 1; }
+          [ -n "$(find . -type f -name '*.apk')" ] || { echo "ERROR: no .apk inside the downloaded files (see list above)"; exit 1; }
 
       - name: Save APK cache
-        if: steps.apkcache.outputs.cache-matched-key == '' && steps.download.outcome == 'success'
+        if: steps.need.outputs.need == 'true' && steps.download.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: apks
           key: facebook-apks-${{ env.MEGA_APK_FOLDER }}-${{ github.run_id }}
 
       - name: Upload APKs as artifact (downloadable copy)
-        if: steps.apkcache.outputs.cache-matched-key == '' && steps.download.outcome == 'success'
+        if: steps.need.outputs.need == 'true' && steps.download.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: facebook-apks

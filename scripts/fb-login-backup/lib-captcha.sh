@@ -6,7 +6,7 @@
 # Audio comes from the emulator's virtual sound card (PulseAudio null sink set up by run-with-emulator.sh).
 # Needs from the caller: log, screenshot, ui_dump, ui_query, ui_texts (lib-ui.sh), $UI_XML, $ARTIFACTS.
 
-CAPTURE_CAPTCHA_AUDIO="${CAPTURE_CAPTCHA_AUDIO:-1}"      # 0 = only screenshot, no audio/video
+CAPTURE_CAPTCHA_AUDIO="${CAPTURE_CAPTCHA_AUDIO:-0}"      # 0 (default) = only screenshot, no audio/video
 CAPTCHA_AUDIO_SECONDS="${CAPTCHA_AUDIO_SECONDS:-20}"     # how long to record after tapping play
 CAPTCHA_AUDIO_TAP="${CAPTCHA_AUDIO_TAP:-}"               # fallback "x y" if the play button is not found in the UI
 CAPTCHA_PLAY_REGEX="${CAPTCHA_PLAY_REGEX:-}"             # optional: your own regex for the play button text/desc

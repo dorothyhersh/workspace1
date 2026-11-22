@@ -16,6 +16,7 @@ unpack_sdk() { sudo mkdir -p "$SDK"; zstd -d -T0 -c "$1" | sudo tar -C "$SDK" -x
 
 ok=0
 for RUN_ID in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow fb-emulator-build.yml --status success --limit 10 --json databaseId --jq '.[].databaseId'); do
+  case " ${SKIP_RUNS:-} " in *" $RUN_ID "*) say "skipping build run $RUN_ID (snapshot was broken)"; continue;; esac
   rm -rf "$TMP"; mkdir -p "$TMP/avd" "$TMP/sdk"
   say "build run $RUN_ID: downloading emulator-avd + emulator-sdk in parallel"
   dl "$RUN_ID" emulator-avd "$TMP/avd" & d1=$!
@@ -30,7 +31,8 @@ for RUN_ID in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow fb-emulator-b
   say "run $RUN_ID has no usable artifact (expired or built without it), trying an older one"
 done
 [ "$ok" = 1 ] || { say "ERROR: no emulator artifact found. Run 'FB - Build emulator + install Facebook' first (kept 90 days)."; exit 1; }
-say "download done, unpacking"
+say "download done (build run $RUN_ID), unpacking"
+mkdir -p "${RUNNER_TEMP:-/tmp}"; echo "$RUN_ID" > "${RUNNER_TEMP:-/tmp}/restored-run-id"
 
 unpack_avd "$TMP/avd/avd.tar.zst" & p1=$!
 p2=""

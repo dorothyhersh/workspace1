@@ -18,7 +18,10 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/../shared/config.sh"
 exec > >(tee -a "$ARTIFACTS/run.log") 2>&1
-for f in lib-ui lib-mega lib-captcha; do source "$DIR/../shared/$f.sh"; done
+for f in lib-ui lib-mega lib-captcha; do source "$DIR/../shared/$f.sh" || echo "WARNING: $f.sh missing"; done
+# safe fallbacks if lib-captcha.sh was not committed (an EMPTY regex would match every screen)
+: "${CAPTCHA_REGEX:=Enter the characters you see|real human behind this login}"
+type capture_captcha_audio >/dev/null 2>&1 || capture_captcha_audio() { screenshot "${SHOT_PREFIX:-}captcha.png"; return 1; }
 
 ACCOUNTS_JSON="${ACCOUNTS_JSON:-}"
 MEGA_KEEP="${MEGA_KEEP:-10}"

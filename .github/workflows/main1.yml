@@ -57,16 +57,17 @@ jobs:
 
           echo "== Patching model to: $MODEL / $BRAND / $MANUF =="
 
-          # Script executed on the device (avoids quoting problems with spaces)
+          # Runs on the device as root. Finds every build.prop on every partition.
           cat > /tmp/patch.sh <<EOF
-          for f in /system/build.prop /vendor/build.prop /product/build.prop /system_ext/build.prop /odm/etc/build.prop; do
-            [ -f "\$f" ] || continue
+          for f in \$(find /system /system_ext /product /vendor /odm -maxdepth 3 -type f -name build.prop 2>/dev/null); do
             sed -i -E \\
               -e 's|^(ro\.product\.([a-z_]+\.)?model)=.*|\1=${MODEL}|' \\
               -e 's|^(ro\.product\.([a-z_]+\.)?brand)=.*|\1=${BRAND}|' \\
               -e 's|^(ro\.product\.([a-z_]+\.)?manufacturer)=.*|\1=${MANUF}|' \\
               "\$f"
+            grep -H -E '^ro\.product\.([a-z_]+\.)?(model|brand|manufacturer)=' "\$f"
           done
+          echo "source_order: \$(getprop ro.product.property_source_order)"
           EOF
 
           adb root; sleep 3
@@ -76,6 +77,7 @@ jobs:
           adb remount || { echo "remount failed"; exit 1; }
 
           adb push /tmp/patch.sh /data/local/tmp/patch.sh
+          echo "== Files patched =="
           adb shell sh /data/local/tmp/patch.sh
 
           adb reboot; wait_boot || exit 1

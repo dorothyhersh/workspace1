@@ -131,24 +131,47 @@ need_root() {
 # Back to the clean snapshot = Facebook installed, nobody logged in, no leftovers of the last account.
 # ONLY "adb emu avd snapshot load" is used (no pm clear). If a load fails it is retried; if all tries fail
 # the function returns 1 and the run stops, so accounts are never mixed.
-reset_clean_state() {
-  log "loading the clean '$SNAPSHOT_NAME' snapshot"
-  local out try ok=0
+# Loads the clean snapshot into the RUNNING emulator and waits until Android answers again.
+# Retried 3x; only "adb emu avd snapshot load" is used (never pm clear).
+load_snapshot() {
+  local out try
   for try in 1 2 3; do
-    out="$(timeout 120 adb emu avd snapshot load "$SNAPSHOT_NAME" 2>&1 | tr -d '\r')"
+    out="$(timeout 180 adb emu avd snapshot load "$SNAPSHOT_NAME" 2>&1 | tr -d '\r')"
     log "snapshot load (try $try/3): $(printf '%s' "$out" | tr '\n' ' ' | head -c 200)"
     if grep -q '^OK' <<<"$out"; then
-      sleep 2; timeout 20 adb reconnect >/dev/null 2>&1; adb wait-for-device
-      # the package service must answer after the load, otherwise load the snapshot again
-      if wait_for_boot; then ok=1; break; fi
-      log "emulator not ready after snapshot load (try $try/3), loading the snapshot again"
+      sleep 3; timeout 20 adb reconnect >/dev/null 2>&1; adb wait-for-device
+      if wait_for_boot; then settle_device; sleep 2; dismiss_system_dialogs; return 0; fi
+      log "emulator not ready after snapshot load (try $try/3)"
     fi
     sleep 5
   done
-  (( ok )) || { log "ERROR: snapshot '$SNAPSHOT_NAME' could not be loaded into a working emulator (3 tries)"; return 1; }
-  settle_device; sleep 2
-  dismiss_system_dialogs
-  adb shell pm list packages | grep -qF "$PACKAGE_NAME" || { log "ERROR: $PACKAGE_NAME missing after reset"; return 1; }
+  log "ERROR: snapshot '$SNAPSHOT_NAME' could not be loaded into a working emulator (3 tries)"
+  return 1
+}
+
+# Back to the clean snapshot = Facebook installed, nobody logged in, no leftovers of the last account.
+reset_clean_state() {
+  log "loading the clean '$SNAPSHOT_NAME' snapshot"
+  load_snapshot || return 1
+  adb shell pm list packages 2>&1 | grep -qF "$PACKAGE_NAME" || { log "ERROR: $PACKAGE_NAME missing after reset"; return 1; }
+}
+
+# Waits until Facebook shows up in the package list. If it does not (package service half-dead after a
+# snapshot resume), prints what Android reports and loads the snapshot again, up to 3 rounds.
+ensure_facebook() {
+  local round i
+  for round in 1 2 3; do
+    for i in $(seq 1 20); do
+      adb shell pm list packages 2>&1 | grep -qF "$PACKAGE_NAME" && return 0
+      sleep 3
+    done
+    log "diag: packages listed=$(adb shell pm list packages 2>&1 | grep -c '^package:'), facebook-like=[$(adb shell pm list packages 2>&1 | grep -i facebook | tr '\n' ' ')], boot_completed=$(adb_sh getprop sys.boot_completed), uptime=$(adb_sh cat /proc/uptime | cut -d' ' -f1)s"
+    screenshot "diag-no-facebook-round$round.png"
+    (( round < 3 )) || break
+    log "Facebook not in the package list (round $round/3), loading snapshot '$SNAPSHOT_NAME' again"
+    load_snapshot || return 1
+  done
+  return 1
 }
 
 # Encrypts this account's Facebook app data and parks it in $PENDING_DIR (uploaded at the end).
@@ -345,12 +368,7 @@ sleep 2
 dismiss_system_dialogs
 shot "00-home-screen.png"
 
-have_pkg=0
-for _ in $(seq 1 30); do   # right after a snapshot resume the package service can need a few more seconds
-  adb shell pm list packages 2>&1 | grep -qF "$PACKAGE_NAME" && { have_pkg=1; break; }
-  sleep 2
-done
-(( have_pkg )) || { log "ERROR: $PACKAGE_NAME is not installed in this emulator snapshot (or the package service never came up)"; exit 1; }
+ensure_facebook || { log "ERROR: $PACKAGE_NAME is not installed in this emulator snapshot (or the package service never came up), see diag-* screenshots"; exit 1; }
 log "Facebook is already installed in the restored emulator (no APK install needed)"
 
 COUNT="$(acc_count)"

@@ -40,6 +40,8 @@ jobs:
       MEGA_APK_FOLDER: ${{ github.event.inputs.apk_folder || 'facebook-apk' }}
       LIVE: ${{ github.event.inputs.live || 'false' }}
       LIVE_MINUTES: ${{ github.event.inputs.live_minutes || '340' }}
+      # Make scrcpy use the SDK adb (same one the emulator runner uses)
+      ADB: /usr/local/lib/android/sdk/platform-tools/adb
 
     steps:
       - name: Checkout
@@ -88,7 +90,7 @@ jobs:
           find . -type f -name '*.apk' | sort
           [ -n "$(find . -type f -name '*.apk')" ] || { echo "No .apk files found (see file list above)"; exit 1; }
 
-      - name: Install scrcpy
+      - name: Install scrcpy (without its bundled adb)
         run: |
           mkdir -p "$HOME/scrcpy"
           URL=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
@@ -97,9 +99,12 @@ jobs:
           echo "Downloading: $URL"
           [ -n "$URL" ] || { echo "No linux release asset found"; exit 1; }
           curl -sL "$URL" | tar -xz -C "$HOME/scrcpy" --strip-components=1
+          # Remove bundled adb so two adb versions never fight (that makes the device go offline)
+          rm -f "$HOME/scrcpy/adb"
           ls -l "$HOME/scrcpy"
           echo "$HOME/scrcpy" >> "$GITHUB_PATH"
           "$HOME/scrcpy/scrcpy" --version
+          "$ADB" version
 
       - name: Join Tailscale (live view)
         if: env.LIVE == 'true'
@@ -133,12 +138,20 @@ jobs:
           MANUF="${3:-INFINIX}"
           BUILD="${4:-}"
 
+          # Wait until the device is really back online after a reboot
+          # (adb wait-for-device is not enough: it often stays "offline")
           wait_boot() {
-            sleep 5
-            adb wait-for-device
+            sleep 8
             local n=0
+            until [ "$(adb get-state 2>/dev/null | tr -d '\r')" = "device" ]; do
+              adb reconnect offline >/dev/null 2>&1 || true
+              sleep 3; n=$((n+1))
+              [ "$n" -gt 60 ] && { echo "device never came online"; return 1; }
+            done
+            n=0
             until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
-              sleep 2; n=$((n+1)); [ "$n" -gt 120 ] && { echo "boot timeout"; return 1; }
+              sleep 2; n=$((n+1))
+              [ "$n" -gt 120 ] && { echo "boot timeout"; return 1; }
             done
             sleep 5
           }
@@ -184,6 +197,119 @@ jobs:
           SCRIPT
           chmod +x scripts/set-model.sh
 
+      - name: Create session script
+        run: |
+          mkdir -p scripts
+          cat > scripts/run-session.sh <<'RUNSCRIPT'
+          #!/usr/bin/env bash
+          set -u
+          mkdir -p screenshots
+
+          # Make sure the device is online before every phase
+          ensure_online() {
+            local n=0
+            until [ "$(adb get-state 2>/dev/null | tr -d '\r')" = "device" ]; do
+              adb reconnect offline >/dev/null 2>&1 || true
+              sleep 3; n=$((n+1))
+              [ "$n" -gt 40 ] && { echo "device still offline"; return 1; }
+            done
+          }
+
+          bash scripts/set-model.sh "$DEVICE_MODEL" "$DEVICE_BRAND" "$DEVICE_MANUF" "$DEVICE_BUILD" > screenshots/set_model_log.txt 2>&1 || echo "Model patch failed, continuing with default model"
+          cat screenshots/set_model_log.txt
+
+          ensure_online
+          adb devices
+          adb shell "settings put global device_name '$DEVICE_MODEL'" || echo "device_name failed"
+
+          adb shell settings put secure immersive_mode_confirmations confirmed
+          adb shell settings put global policy_control immersive.full=*
+          adb shell settings put global policy_control null
+          adb shell settings put secure show_ime_with_hard_keyboard 0
+          adb shell wm size 720x1612
+          adb shell wm density 270
+          sleep 10
+
+          # Lightweight recording (software GPU + 2-4 cores is easily overloaded)
+          ensure_online
+          SDL_VIDEODRIVER=dummy nohup scrcpy -s emulator-5554 --no-window --no-audio --no-control \
+            --max-size=1024 --max-fps=15 --video-bit-rate=2M \
+            --record=screenshots/session.mkv --record-format=mkv \
+            > screenshots/scrcpy_log.txt 2>&1 &
+          sleep 5
+          cat screenshots/scrcpy_log.txt
+
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell input keyevent 82
+          adb shell input keyevent KEYCODE_HOME
+          sleep 8
+          adb exec-out screencap -p > screenshots/01_home.png
+
+          adb shell am start -a android.settings.SETTINGS
+          sleep 8
+          adb exec-out screencap -p > screenshots/02_settings.png
+
+          adb shell am start -a android.settings.DEVICE_INFO_SETTINGS
+          sleep 8
+          adb exec-out screencap -p > screenshots/03_about_phone_top.png
+
+          adb shell input swipe 360 1300 360 500 400
+          sleep 3
+          adb exec-out screencap -p > screenshots/04_about_phone_scrolled.png
+
+          adb shell input swipe 360 1300 360 500 400
+          sleep 3
+          adb exec-out screencap -p > screenshots/05_about_phone_scrolled_more.png
+
+          adb shell am start -a android.settings.DISPLAY_SETTINGS
+          sleep 6
+          adb exec-out screencap -p > screenshots/06_display_settings.png
+
+          adb install-multiple -r -g $(find apks -type f -name '*.apk' | sort) > screenshots/install_log.txt 2>&1 || echo "APK install failed"
+          cat screenshots/install_log.txt
+          adb shell pm list packages | grep -i facebook || echo "facebook package not found"
+          adb shell monkey -p com.facebook.katana -c android.intent.category.LAUNCHER 1
+          sleep 15
+          adb exec-out screencap -p > screenshots/07_facebook.png
+
+          # Stop recording cleanly so the .mkv is finalized
+          pkill -INT -x scrcpy || echo "scrcpy was not running"
+          sleep 5
+
+          adb shell wm size > screenshots/display_info.txt
+          adb shell wm density >> screenshots/display_info.txt
+          adb shell getprop > screenshots/all_props.txt
+          adb shell getprop ro.product.model > screenshots/model.txt
+          adb shell getprop ro.product.brand >> screenshots/model.txt
+          adb shell getprop ro.product.manufacturer >> screenshots/model.txt
+          adb shell getprop ro.build.display.id >> screenshots/model.txt
+          adb shell getprop ro.build.version.release >> screenshots/model.txt
+          adb shell getprop ro.product.cpu.abilist >> screenshots/model.txt
+
+          ls -l screenshots
+
+          if [ "$LIVE" = "true" ]; then
+            adb shell svc power stayon true
+            IP=$(tailscale ip -4 | head -n1)
+            echo "=============================================="
+            echo "LIVE NOW -> runner@$IP"
+            echo "On Lubuntu:"
+            echo "  ssh -N -L 5555:127.0.0.1:5555 runner@$IP &"
+            echo "  adb kill-server; adb connect 127.0.0.1:5555"
+            echo "  scrcpy -s 127.0.0.1:5555 --max-size=1024 --max-fps=20"
+            echo "=============================================="
+            m=$LIVE_MINUTES
+            [ "$m" -gt 340 ] && m=340
+            end=$(( $(date +%s) + m * 60 ))
+            while [ ! -f /tmp/stop-live ] && [ "$(date +%s)" -lt "$end" ]; do
+              # keep the device from silently going offline during the live session
+              [ "$(adb get-state 2>/dev/null | tr -d '\r')" = "device" ] || adb reconnect offline >/dev/null 2>&1 || true
+              sleep 20
+            done
+          fi
+          RUNSCRIPT
+          chmod +x scripts/run-session.sh
+
       - name: Start Emulator + Install Facebook + Screenshots
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -193,76 +319,10 @@ jobs:
           profile: pixel_6
           ram-size: 4096M
           disk-size: 8G
-          cores: 2
+          cores: 4
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -no-metrics -writable-system
           disable-animations: true
-          script: |
-            mkdir -p screenshots
-            bash scripts/set-model.sh "$DEVICE_MODEL" "$DEVICE_BRAND" "$DEVICE_MANUF" "$DEVICE_BUILD" > screenshots/set_model_log.txt 2>&1 || echo "Model patch failed, continuing with default model"
-            cat screenshots/set_model_log.txt
-            adb shell "settings put global device_name '$DEVICE_MODEL'" || echo "device_name failed"
-
-            adb shell settings put secure immersive_mode_confirmations confirmed
-            adb shell settings put global policy_control immersive.full=*
-            adb shell settings put global policy_control null
-            adb shell settings put secure show_ime_with_hard_keyboard 0
-            adb shell wm size 720x1612
-            adb shell wm density 270
-            sleep 10
-
-            SDL_VIDEODRIVER=dummy nohup scrcpy -s emulator-5554 --no-playback --no-audio --no-control --max-size=1024 --video-bit-rate=4M --record=screenshots/session.mkv --record-format=mkv > screenshots/scrcpy_log.txt 2>&1 &
-            sleep 5
-            cat screenshots/scrcpy_log.txt
-
-            adb shell input keyevent KEYCODE_WAKEUP
-            adb shell input keyevent 82
-            adb shell input keyevent KEYCODE_HOME
-            sleep 8
-            adb exec-out screencap -p > screenshots/01_home.png
-
-            adb shell am start -a android.settings.SETTINGS
-            sleep 8
-            adb exec-out screencap -p > screenshots/02_settings.png
-
-            adb shell am start -a android.settings.DEVICE_INFO_SETTINGS
-            sleep 8
-            adb exec-out screencap -p > screenshots/03_about_phone_top.png
-
-            adb shell input swipe 360 1300 360 500 400
-            sleep 3
-            adb exec-out screencap -p > screenshots/04_about_phone_scrolled.png
-
-            adb shell input swipe 360 1300 360 500 400
-            sleep 3
-            adb exec-out screencap -p > screenshots/05_about_phone_scrolled_more.png
-
-            adb shell am start -a android.settings.DISPLAY_SETTINGS
-            sleep 6
-            adb exec-out screencap -p > screenshots/06_display_settings.png
-
-            adb install-multiple -r -g $(find apks -type f -name '*.apk' | sort) > screenshots/install_log.txt 2>&1 || echo "APK install failed"
-            cat screenshots/install_log.txt
-            adb shell pm list packages | grep -i facebook || echo "facebook package not found"
-            adb shell monkey -p com.facebook.katana -c android.intent.category.LAUNCHER 1
-            sleep 15
-            adb exec-out screencap -p > screenshots/07_facebook.png
-
-            pkill -INT -x scrcpy || echo "scrcpy was not running"
-            sleep 5
-
-            adb shell wm size > screenshots/display_info.txt
-            adb shell wm density >> screenshots/display_info.txt
-            adb shell getprop > screenshots/all_props.txt
-            adb shell getprop ro.product.model > screenshots/model.txt
-            adb shell getprop ro.product.brand >> screenshots/model.txt
-            adb shell getprop ro.product.manufacturer >> screenshots/model.txt
-            adb shell getprop ro.build.display.id >> screenshots/model.txt
-            adb shell getprop ro.build.version.release >> screenshots/model.txt
-            adb shell getprop ro.product.cpu.abilist >> screenshots/model.txt
-
-            ls -l screenshots
-
-            if [ "$LIVE" = "true" ]; then adb shell svc power stayon true; echo "LIVE NOW -> runner@$(tailscale ip -4 | head -n1)  (run ~/live-scrcpy.sh on Lubuntu)"; m=$LIVE_MINUTES; [ "$m" -gt 340 ] && m=340; end=$(( $(date +%s) + m * 60 )); while [ ! -f /tmp/stop-live ] && [ "$(date +%s)" -lt "$end" ]; do sleep 20; done; fi
+          script: bash scripts/run-session.sh
 
       - name: Upload Screenshots
         if: always()

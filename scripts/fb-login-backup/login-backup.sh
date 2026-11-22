@@ -198,9 +198,23 @@ backup_session() {
 }
 
 # ---------- login of ONE account ----------
+# What Facebook really sees: the public IP as seen FROM INSIDE the emulator (the phone_guard above only
+# checks the runner host). Logged for every account; if it equals the runner's own IP the login is refused.
+emu_ip_probe() {
+  local ip
+  ip="$(timeout 25 adb shell "printf 'GET / HTTP/1.0\\r\\nHost: ifconfig.me\\r\\nUser-Agent: curl/8.0\\r\\nAccept: */*\\r\\n\\r\\n' | toybox nc -w 10 ifconfig.me 80" 2>/dev/null | tr -d '\r' | tail -n 1)"
+  [[ "$ip" =~ ^[0-9a-fA-F:.]{3,45}$ ]] || ip=""
+  log "emulator-side public IP (what Facebook sees): ${ip:-could not be read}  (runner IP without phone: ${BASELINE_IP:-unknown})"
+  if [[ -n "$ip" && -n "${BASELINE_IP:-}" && "$ip" == "$BASELINE_IP" ]]; then
+    log "ABORT: the emulator itself leaves through the RUNNER IP, not the phone - refusing to log in"; return 1
+  fi
+  return 0
+}
+
 login_account() {
   LOGIN_RESULT="login_failed"
   phone_guard || return 1
+  emu_ip_probe || return 1
 
   launch_app
   # wait only as long as needed (was: fixed 12s) - up to 25s for the login form or the feed
@@ -244,6 +258,12 @@ login_account() {
     if ! logged_in_xml && grep -qiE "$SUSPENDED_REGEX" "$UI_XML"; then
       log "ACCOUNT SUSPENDED: Facebook shows '$(ui_texts | cut -d' ' -f3- | grep -iE "$SUSPENDED_REGEX" | head -1)'"
       bad="suspended"; break
+    fi
+    if grep -qiE "couldn.t find an account|find an account that matches|no account (found|matches)" "$UI_XML"; then
+      log "WARNING: Facebook does not know this email/phone (account not found or wrong login)"; bad="wrong_password"; break
+    fi
+    if grep -qiE 'Enter the characters you see|real human behind this login' "$UI_XML"; then
+      log "WARNING: Facebook shows a captcha (Enter the characters you see) - needs manual attention"; bad="needs_attention"; break
     fi
     if grep -qiE 'incorrect|wrong password|invalid (username|password|email)|doesn.t match|password you.ve entered' "$UI_XML"; then
       log "WARNING: credentials look wrong"; bad="wrong_password"; break

@@ -95,6 +95,8 @@ jobs:
           MEGA_FOLDER: facebook-android-backup
           MEGA_CONF_FOLDER: ${{ env.MEGA_CONF_FOLDER }}
           MEGA_CONF_FILE: ${{ env.MEGA_CONF_FILE }}
+          CAPTURE_CAPTCHA_AUDIO: '1'      # 1 = on captcha: tap play audio + record audio/screen. 0 = off
+          CAPTCHA_AUDIO_SECONDS: '20'     # seconds recorded after tapping play audio
         run: bash scripts/shared/run-with-emulator.sh bash scripts/fb-login-backup/login-backup.sh
 
       - name: Print logs
@@ -111,3 +113,17 @@ jobs:
           path: artifacts/
           if-no-files-found: warn
           retention-days: 3
+
+      # captcha audio (wav + mp3) and screen recording (mp4 with audio) as their own artifact
+      - name: Upload captcha audio + screen recordings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fb-captcha-audio
+          path: |
+            artifacts/*captcha*.wav
+            artifacts/*captcha*.mp3
+            artifacts/*captcha*.mp4
+            artifacts/*captcha*.png
+          if-no-files-found: ignore
+          retention-days: 7

@@ -43,7 +43,7 @@ AUDIO_OK=0; AUDIO_SINK="emu_out"; AUDIO_ARGS=(-noaudio)
 setup_audio() {
   if ! command -v pulseaudio >/dev/null 2>&1 || ! command -v parecord >/dev/null 2>&1 || ! command -v ffmpeg >/dev/null 2>&1; then
     say "installing pulseaudio + ffmpeg"
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pulseaudio pulseaudio-utils ffmpeg >/dev/null 2>&1 \
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends pulseaudio pulseaudio-utils ffmpeg >/dev/null 2>&1 \
       || { say "WARNING: could not install pulseaudio/ffmpeg"; return 1; }
   fi
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(id -u)}"
@@ -55,7 +55,7 @@ setup_audio() {
   pactl list short sinks 2>/dev/null | grep -q "$AUDIO_SINK" || { say "WARNING: null sink '$AUDIO_SINK' missing"; return 1; }
   say "virtual sound card ready: $AUDIO_SINK"
 }
-if [ "${CAPTURE_CAPTCHA_AUDIO:-1}" = "1" ] && setup_audio; then
+if [ "${CAPTURE_CAPTCHA_AUDIO:-0}" = "1" ] && setup_audio; then
   AUDIO_OK=1; AUDIO_ARGS=()
   export QEMU_AUDIO_DRV=pa
   # headless emulators may need this flag to use host audio; only added if this emulator build knows it

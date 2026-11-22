@@ -215,12 +215,10 @@ dismiss_notices() {
   sleep 3
 }
 
-# ---------- text captcha: wait until it has loaded, then (optionally) tap "play audio" and record ----------
+# ---------- text captcha: wait until it has loaded and save a screenshot for manual handling ----------
 CAPTCHA_REGEX="${CAPTCHA_REGEX:-Enter the characters you see|characters you see|real human behind this login|type the (characters|text|code) (you see|shown|below)|enter the (text|code) (you see|shown)}"
-CAPTURE_CAPTCHA_AUDIO="${CAPTURE_CAPTCHA_AUDIO:-0}"       # 1 = also record the audio (needs a snapshot/emulator started WITH audio)
 CAPTCHA_LOAD_WAIT="${CAPTCHA_LOAD_WAIT:-60}"              # seconds to wait for the captcha picture to appear
 CAPTCHA_IMG_STD_MIN="${CAPTCHA_IMG_STD_MIN:-6}"           # picture counts as loaded when the grey-level variation of its area is >= this
-CAPTCHA_AUDIO_SECONDS="${CAPTCHA_AUDIO_SECONDS:-20}"
 CAPTCHA_N=0
 
 # grey-level variation of the area where the captcha picture appears (blank gradient ~1-2, real picture much higher)
@@ -259,9 +257,7 @@ captcha_wait_loaded() {
 
 capture_captcha_audio() {
   CAPTCHA_N=$((CAPTCHA_N + 1))
-  local tag="${SHOT_PREFIX:-}captcha${CAPTCHA_N}" secs="$CAPTCHA_AUDIO_SECONDS" xy="" i apid="" vpid="" have_audio=0
-  local wav="$ARTIFACTS/${tag}-audio.wav" mp3="$ARTIFACTS/${tag}-audio.mp3"
-  local vraw="$TMPD/${tag}-screen.mp4" vout="$ARTIFACTS/${tag}-screen-with-audio.mp4"
+  local tag="${SHOT_PREFIX:-}captcha${CAPTCHA_N}"
 
   log "CAPTCHA detected ($tag): waiting for the picture to load"
   screenshot "${tag}-0-first-seen.png"
@@ -269,35 +265,7 @@ capture_captcha_audio() {
   screenshot "${tag}-1-screen.png"
   ui_dump && cp "$UI_XML" "$ARTIFACTS/${tag}-ui.xml" 2>/dev/null || true
 
-  if [[ "$CAPTURE_CAPTCHA_AUDIO" != "1" ]]; then log "captcha audio recording is off (CAPTURE_CAPTCHA_AUDIO=0), screenshot saved"; return 0; fi
-  if [[ "${AUDIO_OK:-0}" != "1" ]]; then log "WARNING: emulator runs without audio (AUDIO_OK=0), cannot record the captcha audio"; return 1; fi
-
-  for i in 1 2 3; do
-    xy="$(ui_query text 'play.{0,3}audio' 0 || true)"; [[ -n "$xy" ]] && break
-    sleep 2; ui_dump || true
-  done
-  [[ -n "$xy" ]] || { log "WARNING: 'play audio' not found on the captcha screen (see ${tag}-ui.xml)"; return 1; }
-
-  adb shell cmd media_session volume --stream 3 --set 15 >/dev/null 2>&1 || true
-  command -v parecord >/dev/null 2>&1 && { have_audio=1; timeout -s TERM "$secs" parecord --device="${AUDIO_SINK:-emu_out}.monitor" --file-format=wav "$wav" 2>/dev/null & apid=$!; }
-  adb shell "rm -f /sdcard/captcha.mp4" >/dev/null 2>&1
-  timeout -k 3 $((secs + 15)) adb shell screenrecord --time-limit $((secs + 3)) --bit-rate 3000000 /sdcard/captcha.mp4 >/dev/null 2>&1 & vpid=$!
-  sleep 2
-  log "tap play audio at $xy, recording ${secs}s"; adb shell input tap $xy
-  sleep $((secs / 2)); screenshot "${tag}-2-playing.png"
-  [[ -n "$apid" ]] && wait "$apid" 2>/dev/null
-  wait "$vpid" 2>/dev/null; sleep 1
-  adb pull /sdcard/captcha.mp4 "$vraw" >/dev/null 2>&1; adb shell "rm -f /sdcard/captcha.mp4" >/dev/null 2>&1
-  if (( have_audio )) && [[ -s "$wav" ]]; then
-    log "AUDIO SAVED: ${tag}-audio.wav ($(stat -c%s "$wav") bytes)"
-    if command -v ffmpeg >/dev/null 2>&1; then
-      ffmpeg -y -loglevel error -i "$wav" -c:a libmp3lame -q:a 2 "$mp3" && log "AUDIO SAVED: ${tag}-audio.mp3"
-      log "audio level: $(ffmpeg -hide_banner -i "$wav" -af volumedetect -f null - 2>&1 | grep -E 'mean_volume|max_volume' | sed 's/.*\] //' | tr '\n' ' ')"
-      [[ -s "$vraw" ]] && ffmpeg -y -loglevel error -i "$vraw" -i "$wav" -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest "$vout" && log "VIDEO SAVED: ${tag}-screen-with-audio.mp4"
-    fi
-  fi
-  if [[ -s "$vraw" && ! -s "$vout" ]]; then cp "$vraw" "$ARTIFACTS/${tag}-screen.mp4"; log "VIDEO SAVED (no audio): ${tag}-screen.mp4"; fi
-  rm -f "$vraw"; return 0
+  return 0
 }
 
 # ---------- login of ONE account ----------
@@ -366,7 +334,7 @@ login_account() {
       log "WARNING: Facebook does not know this email/phone (account not found or wrong login)"; bad="wrong_password"; break
     fi
     if grep -qiE "$CAPTCHA_REGEX" "$UI_XML"; then
-      log "WARNING: Facebook shows a text captcha - recording the audio version, needs manual attention"
+      log "WARNING: Facebook shows a text captcha - screenshot saved, needs manual attention"
       capture_captcha_audio || log "WARNING: captcha audio capture did not work"
       bad="needs_attention"; break
     fi

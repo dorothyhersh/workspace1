@@ -17,6 +17,9 @@ on:
       build:
         description: "Build number (ro.build.display.id)"
         default: "X6526-H894ABCD-T-GL-240115V1220"
+      apk_folder:
+        description: "Mega folder with the Facebook APK files"
+        default: "facebook-apk"
       live:
         description: "Keep emulator alive for live scrcpy view (true/false)"
         default: "true"
@@ -33,6 +36,8 @@ jobs:
       DEVICE_BRAND: ${{ github.event.inputs.brand || 'Infinix' }}
       DEVICE_MANUF: ${{ github.event.inputs.manufacturer || 'INFINIX' }}
       DEVICE_BUILD: ${{ github.event.inputs.build || 'X6526-H894ABCD-T-GL-240115V1220' }}
+      MEGA_REMOTE: mega
+      MEGA_APK_FOLDER: ${{ github.event.inputs.apk_folder || 'facebook-apk' }}
       LIVE: ${{ github.event.inputs.live || 'false' }}
       LIVE_MINUTES: ${{ github.event.inputs.live_minutes || '340' }}
 
@@ -45,6 +50,32 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+
+      - name: Setup rclone (Mega)
+        env:
+          RCLONE_CONF_DATA: ${{ secrets.RCLONE_CONF }}
+        run: |
+          set -e
+          cd /tmp
+          curl -fsSL -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -oq rclone-current-linux-amd64.zip
+          sudo install -m 755 rclone-*-linux-amd64/rclone /usr/local/bin/rclone
+          rclone version | head -1
+          mkdir -p ~/.config/rclone
+          printf '%s\n' "$RCLONE_CONF_DATA" > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+          [ -s ~/.config/rclone/rclone.conf ] || { echo "RCLONE_CONF secret is empty"; exit 1; }
+          rclone listremotes
+
+      - name: Download Facebook APKs from Mega
+        run: |
+          set -e
+          echo "Folder contents:"
+          rclone lsf "${MEGA_REMOTE}:${MEGA_APK_FOLDER}"
+          mkdir -p "$GITHUB_WORKSPACE/apks"
+          rclone copy "${MEGA_REMOTE}:${MEGA_APK_FOLDER}" "$GITHUB_WORKSPACE/apks" --include "*.apk" --transfers 4 --stats 15s -v
+          ls -lh "$GITHUB_WORKSPACE/apks"
+          ls "$GITHUB_WORKSPACE"/apks/*.apk > /dev/null 2>&1 || { echo "No .apk files downloaded"; exit 1; }
 
       - name: Install scrcpy
         run: |
@@ -138,13 +169,14 @@ jobs:
           adb shell getprop ro.product.brand
           adb shell getprop ro.product.manufacturer
           adb shell getprop ro.build.display.id
+          adb shell getprop ro.product.cpu.abilist
           SCRIPT
           chmod +x scripts/set-model.sh
 
-      - name: Start Emulator + Take Screenshots
+      - name: Start Emulator + Install Facebook + Screenshots
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 33
+          api-level: 30
           target: google_apis
           arch: x86_64
           profile: pixel_6
@@ -197,6 +229,13 @@ jobs:
             sleep 6
             adb exec-out screencap -p > screenshots/06_display_settings.png
 
+            adb install-multiple -r -g apks/*.apk > screenshots/install_log.txt 2>&1 || echo "APK install failed"
+            cat screenshots/install_log.txt
+            adb shell pm list packages | grep -i facebook || echo "facebook package not found"
+            adb shell monkey -p com.facebook.katana -c android.intent.category.LAUNCHER 1
+            sleep 15
+            adb exec-out screencap -p > screenshots/07_facebook.png
+
             pkill -INT -x scrcpy || echo "scrcpy was not running"
             sleep 5
 
@@ -208,6 +247,7 @@ jobs:
             adb shell getprop ro.product.manufacturer >> screenshots/model.txt
             adb shell getprop ro.build.display.id >> screenshots/model.txt
             adb shell getprop ro.build.version.release >> screenshots/model.txt
+            adb shell getprop ro.product.cpu.abilist >> screenshots/model.txt
 
             ls -l screenshots
 

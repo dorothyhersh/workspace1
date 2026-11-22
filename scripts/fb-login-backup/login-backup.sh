@@ -18,10 +18,7 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/../shared/config.sh"
 exec > >(tee -a "$ARTIFACTS/run.log") 2>&1
-for f in lib-ui lib-mega lib-captcha; do source "$DIR/../shared/$f.sh" || echo "WARNING: $f.sh missing"; done
-# safe fallbacks if lib-captcha.sh was not committed (an EMPTY regex would match every screen)
-: "${CAPTCHA_REGEX:=Enter the characters you see|real human behind this login}"
-type capture_captcha_audio >/dev/null 2>&1 || capture_captcha_audio() { screenshot "${SHOT_PREFIX:-}captcha.png"; return 1; }
+for f in lib-ui lib-mega; do source "$DIR/../shared/$f.sh"; done
 
 ACCOUNTS_JSON="${ACCOUNTS_JSON:-}"
 MEGA_KEEP="${MEGA_KEEP:-10}"
@@ -111,7 +108,9 @@ post_login_prompts() {
     if is_logged_in; then log "feed detected"; return 0; fi
     handled=0
     xy="$(ui_query text '^Continue in English' 0 || true)"
-    if [[ -n "$xy" ]]; then
+    if grep -qiE "$NOTICE_REGEX" "$UI_XML"; then
+      dismiss_notices; handled=1
+    elif [[ -n "$xy" ]]; then
       log "tapping 'Continue in English' at $xy"; adb shell input tap $xy; handled=1; sleep 5
     else
       xy="$(ui_query text '^Skip$' 0 || true)"
@@ -201,6 +200,106 @@ backup_session() {
   log "encrypted backup ready for upload: $MEGA_FILE ($(stat -c%s "$PENDING_DIR/$MEGA_FILE") bytes)"
 }
 
+# ---------- account notices ("What happened" / restrictions / removed content) ----------
+# Facebook shows these full-screen pages right after login. The account IS logged in; the page only has to be
+# closed (X button, content-desc "Close"). Handled in the login loop and in post_login_prompts.
+NOTICE_REGEX='What happened|We added restrictions|We removed some content|We removed|Your account (has )?restrictions|Review (your )?(account )?status'
+dismiss_notices() {
+  local xy
+  xy="$(ui_query text '^Close$' 0 || true)"
+  if [[ -n "$xy" ]]; then
+    log "account notice on screen, tapping Close at $xy"; adb shell input tap $xy
+  else
+    log "account notice on screen, no Close button found -> Back key"; adb shell input keyevent 4
+  fi
+  sleep 3
+}
+
+# ---------- text captcha: wait until it has loaded, then (optionally) tap "play audio" and record ----------
+CAPTCHA_REGEX="${CAPTCHA_REGEX:-Enter the characters you see|characters you see|real human behind this login|type the (characters|text|code) (you see|shown|below)|enter the (text|code) (you see|shown)}"
+CAPTURE_CAPTCHA_AUDIO="${CAPTURE_CAPTCHA_AUDIO:-0}"       # 1 = also record the audio (needs a snapshot/emulator started WITH audio)
+CAPTCHA_LOAD_WAIT="${CAPTCHA_LOAD_WAIT:-60}"              # seconds to wait for the captcha picture to appear
+CAPTCHA_IMG_STD_MIN="${CAPTCHA_IMG_STD_MIN:-6}"           # picture counts as loaded when the grey-level variation of its area is >= this
+CAPTCHA_AUDIO_SECONDS="${CAPTCHA_AUDIO_SECONDS:-20}"
+CAPTCHA_N=0
+
+# grey-level variation of the area where the captcha picture appears (blank gradient ~1-2, real picture much higher)
+captcha_image_std() {
+  local png="$TMPD/captcha-probe.png"
+  adb exec-out screencap -p > "$png" 2>/dev/null || return 1
+  python3 - "$png" <<'PY' 2>/dev/null
+import sys
+from PIL import Image, ImageStat
+im = Image.open(sys.argv[1]).convert('L'); w, h = im.size
+box = (int(w*0.05), int(h*0.205), int(w*0.95), int(h*0.325))
+print(round(ImageStat.Stat(im.crop(box)).stddev[0], 1))
+PY
+}
+
+captcha_wait_loaded() {
+  local t0=$SECONDS std xy gen=0
+  while (( SECONDS - t0 < CAPTCHA_LOAD_WAIT )); do
+    std="$(captcha_image_std || true)"
+    if [[ -z "$std" ]]; then log "captcha: cannot measure the picture (python Pillow missing?), waiting 20s instead"; sleep 20; return 0; fi
+    log "captcha picture check: variation=$std (loaded when >= $CAPTCHA_IMG_STD_MIN), waited $((SECONDS - t0))s"
+    awk -v s="$std" -v m="$CAPTCHA_IMG_STD_MIN" 'BEGIN{exit !(s>=m)}' && { log "captcha picture is loaded"; return 0; }
+    # still blank after 25s -> ask Facebook for a new one (once)
+    if (( ! gen && SECONDS - t0 >= 25 )); then
+      gen=1
+      if ui_dump; then
+        xy="$(ui_query text 'generate new' 0 || true)"
+        [[ -n "$xy" ]] && { log "captcha still blank, tapping 'Generate new' at $xy"; adb shell input tap $xy; }
+      fi
+    fi
+    sleep 4
+  done
+  log "WARNING: captcha picture did not load within ${CAPTCHA_LOAD_WAIT}s"
+  return 1
+}
+
+capture_captcha_audio() {
+  CAPTCHA_N=$((CAPTCHA_N + 1))
+  local tag="${SHOT_PREFIX:-}captcha${CAPTCHA_N}" secs="$CAPTCHA_AUDIO_SECONDS" xy="" i apid="" vpid="" have_audio=0
+  local wav="$ARTIFACTS/${tag}-audio.wav" mp3="$ARTIFACTS/${tag}-audio.mp3"
+  local vraw="$TMPD/${tag}-screen.mp4" vout="$ARTIFACTS/${tag}-screen-with-audio.mp4"
+
+  log "CAPTCHA detected ($tag): waiting for the picture to load"
+  screenshot "${tag}-0-first-seen.png"
+  captcha_wait_loaded || true
+  screenshot "${tag}-1-screen.png"
+  ui_dump && cp "$UI_XML" "$ARTIFACTS/${tag}-ui.xml" 2>/dev/null || true
+
+  if [[ "$CAPTURE_CAPTCHA_AUDIO" != "1" ]]; then log "captcha audio recording is off (CAPTURE_CAPTCHA_AUDIO=0), screenshot saved"; return 0; fi
+  if [[ "${AUDIO_OK:-0}" != "1" ]]; then log "WARNING: emulator runs without audio (AUDIO_OK=0), cannot record the captcha audio"; return 1; fi
+
+  for i in 1 2 3; do
+    xy="$(ui_query text 'play.{0,3}audio' 0 || true)"; [[ -n "$xy" ]] && break
+    sleep 2; ui_dump || true
+  done
+  [[ -n "$xy" ]] || { log "WARNING: 'play audio' not found on the captcha screen (see ${tag}-ui.xml)"; return 1; }
+
+  adb shell cmd media_session volume --stream 3 --set 15 >/dev/null 2>&1 || true
+  command -v parecord >/dev/null 2>&1 && { have_audio=1; timeout -s TERM "$secs" parecord --device="${AUDIO_SINK:-emu_out}.monitor" --file-format=wav "$wav" 2>/dev/null & apid=$!; }
+  adb shell "rm -f /sdcard/captcha.mp4" >/dev/null 2>&1
+  timeout -k 3 $((secs + 15)) adb shell screenrecord --time-limit $((secs + 3)) --bit-rate 3000000 /sdcard/captcha.mp4 >/dev/null 2>&1 & vpid=$!
+  sleep 2
+  log "tap play audio at $xy, recording ${secs}s"; adb shell input tap $xy
+  sleep $((secs / 2)); screenshot "${tag}-2-playing.png"
+  [[ -n "$apid" ]] && wait "$apid" 2>/dev/null
+  wait "$vpid" 2>/dev/null; sleep 1
+  adb pull /sdcard/captcha.mp4 "$vraw" >/dev/null 2>&1; adb shell "rm -f /sdcard/captcha.mp4" >/dev/null 2>&1
+  if (( have_audio )) && [[ -s "$wav" ]]; then
+    log "AUDIO SAVED: ${tag}-audio.wav ($(stat -c%s "$wav") bytes)"
+    if command -v ffmpeg >/dev/null 2>&1; then
+      ffmpeg -y -loglevel error -i "$wav" -c:a libmp3lame -q:a 2 "$mp3" && log "AUDIO SAVED: ${tag}-audio.mp3"
+      log "audio level: $(ffmpeg -hide_banner -i "$wav" -af volumedetect -f null - 2>&1 | grep -E 'mean_volume|max_volume' | sed 's/.*\] //' | tr '\n' ' ')"
+      [[ -s "$vraw" ]] && ffmpeg -y -loglevel error -i "$vraw" -i "$wav" -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest "$vout" && log "VIDEO SAVED: ${tag}-screen-with-audio.mp4"
+    fi
+  fi
+  if [[ -s "$vraw" && ! -s "$vout" ]]; then cp "$vraw" "$ARTIFACTS/${tag}-screen.mp4"; log "VIDEO SAVED (no audio): ${tag}-screen.mp4"; fi
+  rm -f "$vraw"; return 0
+}
+
 # ---------- login of ONE account ----------
 # What Facebook really sees: the public IP as seen FROM INSIDE the emulator (the phone_guard above only
 # checks the runner host). Logged for every account; if it equals the runner's own IP the login is refused.
@@ -277,6 +376,7 @@ login_account() {
     if grep -qiE 'two-factor|authentication app|confirm it.s you|checkpoint|suspicious|secure your account' "$UI_XML"; then
       log "WARNING: Facebook is asking for a security check / 2FA code (needs manual attention)"; bad="needs_attention"; break
     fi
+    if grep -qiE "$NOTICE_REGEX" "$UI_XML"; then dismiss_notices; continue; fi     # "What happened" / restrictions page
     xy="$(ui_query text '^(Save|OK)$' 0 || true)"     # "Save your login info?"
     if [[ -n "$xy" ]]; then log "tapping Save/OK at $xy"; adb shell input tap $xy; sleep 1; continue; fi
     logged_in_xml && { log "feed detected after $((SECONDS - t))s"; feed=1; break; }
@@ -382,6 +482,7 @@ upload_pending() {
 
 # ===================== MAIN =====================
 [[ -n "${BACKUP_PASSPHRASE:-}" ]] || { log "ERROR: BACKUP_PASSPHRASE secret is empty"; exit 1; }
+python3 -c "import PIL" 2>/dev/null || python3 -m pip install -q pillow 2>/dev/null || python3 -m pip install -q --break-system-packages pillow 2>/dev/null || true
 adb devices -l
 if ! wait_for_boot; then
   # snapshot resume sometimes comes up with a dead package service (seen: "package manager service not

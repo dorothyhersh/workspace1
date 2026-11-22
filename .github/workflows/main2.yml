@@ -18,7 +18,7 @@ on:
         description: "Build number (ro.build.display.id)"
         default: "X6526-H894ABCD-T-GL-240115V1220"
       apk_folder:
-        description: "Mega folder with the Facebook APK files"
+        description: "Mega folder with the Facebook APK files (or a zip)"
         default: "facebook-apk"
       live:
         description: "Keep emulator alive for live scrcpy view (true/false)"
@@ -73,9 +73,20 @@ jobs:
           echo "Folder contents:"
           rclone lsf "${MEGA_REMOTE}:${MEGA_APK_FOLDER}"
           mkdir -p "$GITHUB_WORKSPACE/apks"
-          rclone copy "${MEGA_REMOTE}:${MEGA_APK_FOLDER}" "$GITHUB_WORKSPACE/apks" --include "*.apk" --transfers 4 --stats 15s -v
-          ls -lh "$GITHUB_WORKSPACE/apks"
-          ls "$GITHUB_WORKSPACE"/apks/*.apk > /dev/null 2>&1 || { echo "No .apk files downloaded"; exit 1; }
+          rclone copy "${MEGA_REMOTE}:${MEGA_APK_FOLDER}" "$GITHUB_WORKSPACE/apks" \
+            --include "*.apk" --include "*.zip" --include "*.xapk" --include "*.apks" --include "*.apkm" \
+            --transfers 4 --stats 15s -v
+          cd "$GITHUB_WORKSPACE/apks"
+          for z in *.zip *.xapk *.apks *.apkm; do
+            [ -e "$z" ] || continue
+            echo "Unzipping $z"
+            unzip -oq "$z" -d "extracted_${z%.*}"
+          done
+          echo "== All files =="
+          find . -type f -exec ls -lh {} \;
+          echo "== APK files found =="
+          find . -type f -name '*.apk' | sort
+          [ -n "$(find . -type f -name '*.apk')" ] || { echo "No .apk files found (see file list above)"; exit 1; }
 
       - name: Install scrcpy
         run: |
@@ -229,7 +240,7 @@ jobs:
             sleep 6
             adb exec-out screencap -p > screenshots/06_display_settings.png
 
-            adb install-multiple -r -g apks/*.apk > screenshots/install_log.txt 2>&1 || echo "APK install failed"
+            adb install-multiple -r -g $(find apks -type f -name '*.apk' | sort) > screenshots/install_log.txt 2>&1 || echo "APK install failed"
             cat screenshots/install_log.txt
             adb shell pm list packages | grep -i facebook || echo "facebook package not found"
             adb shell monkey -p com.facebook.katana -c android.intent.category.LAUNCHER 1

@@ -4,11 +4,25 @@ on:
   push:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      model:
+        description: "Device model to show in About phone"
+        default: "Infinix Smart 8 Plus"
+      brand:
+        description: "Brand"
+        default: "Infinix"
+      manufacturer:
+        description: "Manufacturer"
+        default: "INFINIX"
 
 jobs:
   emulator-screenshots:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
+    env:
+      DEVICE_MODEL: ${{ github.event.inputs.model || 'Infinix Smart 8 Plus' }}
+      DEVICE_BRAND: ${{ github.event.inputs.brand || 'Infinix' }}
+      DEVICE_MANUF: ${{ github.event.inputs.manufacturer || 'INFINIX' }}
 
     steps:
       - name: Checkout
@@ -19,6 +33,59 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+
+      - name: Create set-model script
+        run: |
+          mkdir -p scripts
+          cat > scripts/set-model.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -uo pipefail
+
+          MODEL="${1:-Infinix Smart 8 Plus}"
+          BRAND="${2:-Infinix}"
+          MANUF="${3:-INFINIX}"
+
+          wait_boot() {
+            sleep 5
+            adb wait-for-device
+            local n=0
+            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+              sleep 2; n=$((n+1)); [ "$n" -gt 120 ] && { echo "boot timeout"; return 1; }
+            done
+            sleep 5
+          }
+
+          echo "== Patching model to: $MODEL / $BRAND / $MANUF =="
+
+          # Script executed on the device (avoids quoting problems with spaces)
+          cat > /tmp/patch.sh <<EOF
+          for f in /system/build.prop /vendor/build.prop /product/build.prop /system_ext/build.prop /odm/etc/build.prop; do
+            [ -f "\$f" ] || continue
+            sed -i -E \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?model)=.*|\1=${MODEL}|' \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?brand)=.*|\1=${BRAND}|' \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?manufacturer)=.*|\1=${MANUF}|' \\
+              "\$f"
+          done
+          EOF
+
+          adb root; sleep 3
+          adb disable-verity
+          adb reboot; wait_boot || exit 1
+          adb root; sleep 3
+          adb remount || { echo "remount failed"; exit 1; }
+
+          adb push /tmp/patch.sh /data/local/tmp/patch.sh
+          adb shell sh /data/local/tmp/patch.sh
+
+          adb reboot; wait_boot || exit 1
+
+          echo "== Result =="
+          adb shell getprop ro.product.model
+          adb shell getprop ro.product.brand
+          adb shell getprop ro.product.manufacturer
+          SCRIPT
+          chmod +x scripts/set-model.sh
 
       - name: Start Emulator + Take Screenshots
         uses: reactivecircus/android-emulator-runner@v2
@@ -34,6 +101,8 @@ jobs:
           disable-animations: true
           script: |
             mkdir -p screenshots
+            bash scripts/set-model.sh "$DEVICE_MODEL" "$DEVICE_BRAND" "$DEVICE_MANUF" 2>&1 | tee screenshots/set_model_log.txt || echo "Model patch failed, continuing with default model"
+            adb shell settings put global device_name "$DEVICE_MODEL"
 
             adb shell settings put secure immersive_mode_confirmations confirmed
             adb shell settings put global policy_control immersive.full=*
@@ -73,6 +142,7 @@ jobs:
             adb shell wm density >> screenshots/display_info.txt
             adb shell getprop > screenshots/all_props.txt
             adb shell getprop ro.product.model > screenshots/model.txt
+            adb shell getprop ro.product.brand >> screenshots/model.txt
             adb shell getprop ro.product.manufacturer >> screenshots/model.txt
             adb shell getprop ro.build.version.release >> screenshots/model.txt
 

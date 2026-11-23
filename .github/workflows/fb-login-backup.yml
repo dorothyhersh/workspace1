@@ -96,9 +96,10 @@ jobs:
           MEGA_CONF_FOLDER: ${{ env.MEGA_CONF_FOLDER }}
           MEGA_CONF_FILE: ${{ env.MEGA_CONF_FILE }}
           GH_TOKEN: ${{ github.token }}   # lets run-with-emulator.sh fetch an OLDER emulator build if the newest snapshot is broken
-          CAPTURE_CAPTCHA_AUDIO: '1'      # 1 = tap "play audio" on the captcha and record wav/mp3/mp4 (starts the virtual sound card). 0 = off (-noaudio)
-          CAPTCHA_AUDIO_SECONDS: '20'     # seconds recorded after tapping play audio
-          CAPTCHA_AUDIO_TAP: '727 837'    # fallback tap if the "play audio" button is not found (bounds [634,813][821,862])
+          CAPTURE_CAPTCHA_AUDIO: '1'      # 1 = try to find + tap "play audio" on the captcha. 0 = off entirely
+          CAPTCHA_TAP_ONLY: '1'           # 1 (debug) = just tap + screenshot every attempt, NO recording. 0 = also record wav/mp3/mp4
+          CAPTCHA_AUDIO_SECONDS: '20'     # only used once CAPTCHA_TAP_ONLY=0
+          CAPTCHA_AUDIO_TAP: '727 837'    # last-resort fallback tap if no detection method finds the button
         run: bash scripts/shared/run-with-emulator.sh bash scripts/fb-login-backup/login-backup.sh
 
       - name: Print logs

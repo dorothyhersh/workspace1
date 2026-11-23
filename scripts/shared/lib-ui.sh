@@ -7,6 +7,26 @@
 log() { printf '[fb %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; printf '%s' "$*" > "${ARTIFACTS:-/tmp}/phase" 2>/dev/null || true; }
 adb_sh() { adb shell "$@" | tr -d '\r'; }
 
+# ---- logged input wrappers: every adb tap / keypress / text entry prints BEFORE it runs,
+# so progress is visible live in the workflow log, not just inferred afterward from screenshots ----
+adb_tap() {
+  local x="$1" y="$2" label="${3:-tap}"
+  log "ACTION: $label -> input tap $x $y"
+  adb shell input tap "$x" "$y"
+}
+adb_key() {
+  local code="$1" label="${2:-keyevent $1}"
+  log "ACTION: $label -> input keyevent $code"
+  adb shell input keyevent "$code" >/dev/null 2>&1
+}
+# mask=1 logs '********' instead of the real text (use for passwords / anything sensitive)
+adb_text() {
+  local s="$1" label="${2:-type text}" mask="${3:-0}" q="'"
+  if [[ "$mask" == "1" ]]; then log "ACTION: $label -> input text '********'"; else log "ACTION: $label -> input text '$s'"; fi
+  s="${s//$q/$q\\$q$q}"; s="${s// /%s}"
+  adb shell "input text '$s'" >/dev/null 2>&1
+}
+
 screenshot() {
   local f="$ARTIFACTS/$1"
   adb exec-out screencap -p > "$f" 2>/dev/null
@@ -109,7 +129,7 @@ tap_text() {
   done
   [[ -z "$xy" && -n "$fallback" ]] && { log "'$pat' not found, fallback tap $fallback"; xy="$fallback"; }
   [[ -z "$xy" ]] && { log "'$pat' not found"; return 1; }
-  log "tap '$pat' at $xy"; adb shell input tap $xy
+  adb_tap $xy "tap '$pat'"
 }
 
 focus_line() { adb shell dumpsys window 2>/dev/null | grep -E 'mCurrentFocus' | head -1 | tr -d '\r'; }
@@ -126,7 +146,7 @@ dismiss_system_dialogs() {
       fi
     fi
     [[ -z "$xy" ]] && break
-    log "system dialog, tapping $xy"; adb shell input tap $xy; sleep 3
+    adb_tap $xy "system dialog"; sleep 3
   done
   return 0
 }
@@ -138,7 +158,7 @@ dismiss_popups() {
     hit=0
     if ui_dump; then
       xy="$(ui_query text "$DISMISS_REGEX" 0 || true)"
-      if [[ -n "$xy" ]]; then log "popup, tapping dismiss at $xy"; adb shell input tap $xy; hit=1; sleep 3; fi
+      if [[ -n "$xy" ]]; then adb_tap $xy "dismiss popup"; hit=1; sleep 3; fi
     fi
     if [[ "$hit" == "0" ]]; then (( i >= 1 )) && break; sleep 3; fi
   done

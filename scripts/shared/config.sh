@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # config.sh - every setting in one place. All can be overridden by workflow env vars.
+# (No changes needed here for the live-logging fix - that fix lives in login-backup.sh's
+# exec line. This file is reproduced as-is so you have all four in sync.)
 
 ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
 ARTIFACTS="${ROOT}/artifacts"

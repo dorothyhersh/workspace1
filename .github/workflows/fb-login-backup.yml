@@ -102,6 +102,19 @@ jobs:
           CAPTCHA_AUDIO_TAP: '727 837'    # last-resort fallback tap if no detection method finds the button
         run: bash scripts/shared/run-with-emulator.sh bash scripts/fb-login-backup/login-backup.sh
 
+      # Insurance: login-backup.sh already switches the exit node off itself before its own Mega
+      # upload (switch_to_runner_ip in the script), but this step runs regardless of whether that
+      # succeeded, and *before* the two upload-artifact steps below - so screenshots/logs/captcha
+      # files always go to GitHub over the runner's own IP, never routed through the phone.
+      - name: Switch off phone exit node (use runner's own IP for GitHub artifact uploads)
+        if: always()
+        run: |
+          echo "tailscale status BEFORE:"; timeout 15 tailscale status || true
+          timeout -k 3 30 sudo tailscale set --exit-node= || echo "::warning::could not clear the exit node (may already be off)"
+          sleep 2
+          echo "tailscale status AFTER:"; timeout 15 tailscale status || true
+          echo "runner public IP now: $(curl -s --max-time 15 https://ifconfig.me || echo unknown)  (baseline was: ${BASELINE_IP:-unknown})"
+
       - name: Print logs
         if: always()
         run: |

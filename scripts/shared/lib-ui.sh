@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # lib-ui.sh - generic adb / UI helpers (sourced, not run directly)
+# (No logic changes needed here for the live-logging fix - log() already writes with bash's
+# own printf builtin, which is unbuffered. The buffering problem was entirely in login-backup.sh's
+# `exec > >(tee ...)` line, now fixed there with `stdbuf -oL`. Reproduced as-is for completeness.)
 
 log() { printf '[fb %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; printf '%s' "$*" > "${ARTIFACTS:-/tmp}/phase" 2>/dev/null || true; }
 adb_sh() { adb shell "$@" | tr -d '\r'; }

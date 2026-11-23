@@ -3,20 +3,24 @@
 # When Facebook shows "Enter the characters you see": screenshot it, tap "play audio", and RECORD
 #   1) the audio only      -> artifacts/<acc>-captchaN-audio.wav  and  .mp3
 #   2) the screen + audio  -> artifacts/<acc>-captchaN-screen-with-audio.mp4
+# plus screenshots: before the tap, 3s after the tap, halfway through, and after the recording.
 # Audio comes from the emulator's virtual sound card (PulseAudio null sink set up by run-with-emulator.sh).
 # Needs from the caller: log, screenshot, ui_dump, ui_query, ui_texts (lib-ui.sh), $UI_XML, $ARTIFACTS.
 
 CAPTURE_CAPTCHA_AUDIO="${CAPTURE_CAPTCHA_AUDIO:-0}"      # 0 (default) = only screenshot, no audio/video
 CAPTCHA_AUDIO_SECONDS="${CAPTCHA_AUDIO_SECONDS:-20}"     # how long to record after tapping play
-CAPTCHA_AUDIO_TAP="${CAPTCHA_AUDIO_TAP:-}"               # fallback "x y" if the play button is not found in the UI
-CAPTCHA_PLAY_REGEX="${CAPTCHA_PLAY_REGEX:-}"             # optional: your own regex for the play button text/desc
+CAPTCHA_AUDIO_TAP="${CAPTCHA_AUDIO_TAP:-727 837}"        # fallback "x y": centre of the "play audio" button (bounds [634,813][821,862])
+CAPTCHA_PLAY_REGEX="${CAPTCHA_PLAY_REGEX:-}"             # optional: your own regex for the play button text
 CAPTCHA_REGEX="${CAPTCHA_REGEX:-Enter the characters you see|characters you see|real human behind this login|type the (characters|text|code) (you see|shown|below)|enter the (text|code) (you see|shown)}"
 CAPTCHA_N=0
 
-# prints "x y" of the play-audio button (most specific wording first)
+# prints "x y" of the play-audio button.
+# IMPORTANT: Facebook has a PARENT node with the text "Can't read this? Generate new or play audio".
+# A loose regex like 'play.{0,3}audio' matches that parent first, and its centre is the "Generate new"
+# button. So only the EXACT button text "play audio" is searched here (anchored), never the parent.
 captcha_find_play() {
   local xy="" r
-  for r in "$CAPTCHA_PLAY_REGEX" 'play.{0,3}audio|audio (captcha|challenge)|audio version' 'listen|hear (it|the)' 'audio|sound|speaker'; do
+  for r in "$CAPTCHA_PLAY_REGEX" '^play audio$' '^Play audio$'; do
     [[ -n "$r" ]] || continue
     xy="$(ui_query text "$r" 0 || true)"
     [[ -n "$xy" ]] && { printf '%s' "$xy"; return 0; }
@@ -29,7 +33,7 @@ capture_captcha_audio() {
   local tag="${SHOT_PREFIX:-}captcha${CAPTCHA_N}" secs="$CAPTCHA_AUDIO_SECONDS" tmp="${RUNNER_TEMP:-/tmp}"
   local wav="$ARTIFACTS/${tag}-audio.wav" mp3="$ARTIFACTS/${tag}-audio.mp3"
   local vraw="$tmp/${tag}-screen.mp4" vout="$ARTIFACTS/${tag}-screen-with-audio.mp4"
-  local xy="" i have_audio=0 apid="" vpid=""
+  local xy="" i have_audio=0 apid="" vpid="" half
 
   log "CAPTCHA detected ($tag): saving screenshot + UI dump"
   screenshot "${tag}-1-screen.png"
@@ -44,11 +48,12 @@ capture_captcha_audio() {
     xy="$(captcha_find_play || true)"; [[ -n "$xy" ]] && break
     sleep 2; ui_dump || true
   done
-  if [[ -z "$xy" && -n "$CAPTCHA_AUDIO_TAP" ]]; then log "play-audio button not found, using CAPTCHA_AUDIO_TAP=$CAPTCHA_AUDIO_TAP"; xy="$CAPTCHA_AUDIO_TAP"; fi
+  if [[ -z "$xy" && -n "$CAPTCHA_AUDIO_TAP" ]]; then log "play-audio button not found in the UI, using CAPTCHA_AUDIO_TAP=$CAPTCHA_AUDIO_TAP"; xy="$CAPTCHA_AUDIO_TAP"; fi
   if [[ -z "$xy" ]]; then
     log "WARNING: no play-audio button found on the captcha screen - see ${tag}-ui.xml / ${tag}-1-screen.png, then set CAPTCHA_PLAY_REGEX or CAPTCHA_AUDIO_TAP"
     return 1
   fi
+  log "play audio button at: $xy"
 
   # media volume to max (Android 11 has `cmd media_session`, older has `media`)
   adb shell cmd media_session volume --stream 3 --set 15 >/dev/null 2>&1 \
@@ -69,8 +74,11 @@ capture_captcha_audio() {
 
   log "tap play audio at $xy, recording ${secs}s"
   adb shell input tap $xy
-  sleep $((secs / 2))
-  screenshot "${tag}-2-playing.png"
+  sleep 3
+  screenshot "${tag}-2-playing-3s.png"
+  half=$(( secs / 2 - 3 )); (( half < 1 )) && half=1
+  sleep "$half"
+  screenshot "${tag}-3-playing-mid.png"
   [[ -n "$apid" ]] && wait "$apid" 2>/dev/null     # parecord stops by itself after $secs
   wait "$vpid" 2>/dev/null
   sleep 1
@@ -94,6 +102,6 @@ capture_captcha_audio() {
   if [[ -s "$vraw" && ! -s "$vout" ]]; then cp "$vraw" "$ARTIFACTS/${tag}-screen.mp4"; log "VIDEO SAVED (no audio): ${tag}-screen.mp4"; fi
   [[ -s "$vraw" ]] || log "WARNING: screen recording failed (screenrecord produced no file)"
   rm -f "$vraw"
-  screenshot "${tag}-3-after.png"
+  screenshot "${tag}-4-after.png"
   return 0
 }

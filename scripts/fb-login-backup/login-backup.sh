@@ -12,13 +12,15 @@
 # "account suspended/disabled/locked") is detected the moment the screen shows, gets NO backup, an EMPTY
 # BACKUP_FILE_NAME and STATUS=suspended.  Only accounts that really logged in are backed up + uploaded, and
 # a suspended / failed account never makes the workflow fail or blocks the other accounts' upload.
+# Text captcha: waits for the picture, then (CAPTURE_CAPTCHA_AUDIO=1) tries several ways to find and
+# tap "play audio", screenshotting every attempt (see shared/lib-captcha.sh).
 # Accounts come from $ACCOUNTS_JSON (written by scripts/load-config-from-mega.py from the Mega sheet).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/../shared/config.sh"
 exec > >(tee -a "$ARTIFACTS/run.log") 2>&1
-for f in lib-ui lib-mega; do source "$DIR/../shared/$f.sh"; done
+for f in lib-ui lib-mega lib-captcha; do source "$DIR/../shared/$f.sh"; done
 
 ACCOUNTS_JSON="${ACCOUNTS_JSON:-}"
 MEGA_KEEP="${MEGA_KEEP:-10}"
@@ -130,11 +132,9 @@ need_root() {
   [[ "$(adb_sh id -u 2>/dev/null)" == "0" ]]
 }
 
-# Back to the clean snapshot = Facebook installed, nobody logged in, no leftovers of the last account.
-# ONLY "adb emu avd snapshot load" is used (no pm clear). If a load fails it is retried; if all tries fail
-# the function returns 1 and the run stops, so accounts are never mixed.
 # Loads the clean snapshot into the RUNNING emulator and waits until Android answers again.
-# Retried 3x; only "adb emu avd snapshot load" is used (never pm clear).
+# Retried 3x; only "adb emu avd snapshot load" is used (never pm clear). If all tries fail the function
+# returns 1 and the run stops, so accounts are never mixed.
 load_snapshot() {
   local out try
   [[ "${COLD_BOOT:-0}" == "1" ]] && { log "cold-boot mode: there is no usable snapshot to load"; return 1; }
@@ -215,11 +215,11 @@ dismiss_notices() {
   sleep 3
 }
 
-# ---------- text captcha: wait until it has loaded and save a screenshot for manual handling ----------
-CAPTCHA_REGEX="${CAPTCHA_REGEX:-Enter the characters you see|characters you see|real human behind this login|type the (characters|text|code) (you see|shown|below)|enter the (text|code) (you see|shown)}"
+# ---------- text captcha: wait until the picture has loaded, then play audio + tap tests (lib-captcha.sh) ----------
+# CAPTCHA_REGEX, CAPTCHA_N and capture_captcha_audio() come from lib-captcha.sh (do NOT redefine them here -
+# a local redefinition after sourcing would silently replace the library's version and the tap would never run).
 CAPTCHA_LOAD_WAIT="${CAPTCHA_LOAD_WAIT:-60}"              # seconds to wait for the captcha picture to appear
 CAPTCHA_IMG_STD_MIN="${CAPTCHA_IMG_STD_MIN:-6}"           # picture counts as loaded when the grey-level variation of its area is >= this
-CAPTCHA_N=0
 
 # grey-level variation of the area where the captcha picture appears (blank gradient ~1-2, real picture much higher)
 captcha_image_std() {
@@ -245,7 +245,7 @@ captcha_wait_loaded() {
     if (( ! gen && SECONDS - t0 >= 25 )); then
       gen=1
       if ui_dump; then
-        xy="$(ui_query text 'generate new' 0 || true)"
+        xy="$(ui_query text '^Generate new$' 0 || true)"
         [[ -n "$xy" ]] && { log "captcha still blank, tapping 'Generate new' at $xy"; adb shell input tap $xy; }
       fi
     fi
@@ -255,17 +255,13 @@ captcha_wait_loaded() {
   return 1
 }
 
-capture_captcha_audio() {
-  CAPTCHA_N=$((CAPTCHA_N + 1))
-  local tag="${SHOT_PREFIX:-}captcha${CAPTCHA_N}"
-
-  log "CAPTCHA detected ($tag): waiting for the picture to load"
-  screenshot "${tag}-0-first-seen.png"
+# wait for the picture, then find + tap "play audio" (function from lib-captcha.sh)
+capture_captcha() {
+  log "CAPTCHA on screen: waiting for the picture to load"
+  screenshot "${SHOT_PREFIX:-}captcha-0-first-seen.png"
   captcha_wait_loaded || true
-  screenshot "${tag}-1-screen.png"
-  ui_dump && cp "$UI_XML" "$ARTIFACTS/${tag}-ui.xml" 2>/dev/null || true
-
-  return 0
+  ui_dump || true
+  capture_captcha_audio
 }
 
 # ---------- login of ONE account ----------
@@ -334,8 +330,8 @@ login_account() {
       log "WARNING: Facebook does not know this email/phone (account not found or wrong login)"; bad="wrong_password"; break
     fi
     if grep -qiE "$CAPTCHA_REGEX" "$UI_XML"; then
-      log "WARNING: Facebook shows a text captcha - screenshot saved, needs manual attention"
-      capture_captcha_audio || log "WARNING: captcha audio capture did not work"
+      log "WARNING: Facebook shows a text captcha - trying to find + tap play audio, needs manual attention"
+      capture_captcha || log "WARNING: captcha tap/capture did not work"
       bad="needs_attention"; break
     fi
     if grep -qiE 'incorrect|wrong password|invalid (username|password|email)|doesn.t match|password you.ve entered' "$UI_XML"; then

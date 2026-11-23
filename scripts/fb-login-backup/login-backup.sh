@@ -19,7 +19,10 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/../shared/config.sh"
-exec > >(tee -a "$ARTIFACTS/run.log") 2>&1
+# -oL = line-buffered: without this, tee holds output in ~4KB chunks when its stdout isn't a
+# terminal (true in GitHub Actions), so the workflow log only "expands" in bursts, or all at once
+# at the end. With it, every log() line is flushed to the Actions console the instant it's written.
+exec > >(stdbuf -oL tee -a "$ARTIFACTS/run.log") 2>&1
 for f in lib-ui lib-mega lib-captcha; do
   p="$DIR/../shared/$f.sh"
   [[ -f "$p" ]] || { echo "FATAL: required file missing: $p (it must exist in the repo at scripts/shared/$f.sh)"; exit 1; }
@@ -98,14 +101,11 @@ tap_field() {
     xy="$(ui_find class 'EditText' "$1" || true)"; [[ -n "$xy" ]] && break; sleep 2
   done
   [[ -z "$xy" ]] && { log "text field #$1 not found"; return 1; }
-  log "tap text field #$1 at $xy"; adb shell input tap $xy
+  adb_tap $xy "text field #$1"
 }
 
-type_text() {
-  local s="$1" q="'"
-  s="${s//$q/$q\\$q$q}"; s="${s// /%s}"
-  adb shell "input text '$s'" >/dev/null 2>&1
-}
+# type_text <string> [mask: 0|1]  - mask=1 for passwords, logs '********' instead of the real value
+type_text() { adb_text "$1" "type into focused field" "${2:-0}"; }
 
 post_login_prompts() {
   local rounds="${1:-12}" i xy handled
@@ -117,13 +117,13 @@ post_login_prompts() {
     if grep -qiE "$NOTICE_REGEX" "$UI_XML"; then
       dismiss_notices; handled=1
     elif [[ -n "$xy" ]]; then
-      log "tapping 'Continue in English' at $xy"; adb shell input tap $xy; handled=1; sleep 5
+      adb_tap $xy "Continue in English"; handled=1; sleep 5
     else
       xy="$(ui_query text '^Skip$' 0 || true)"
-      if [[ -n "$xy" ]]; then log "tapping 'Skip' at $xy"; adb shell input tap $xy; handled=1; sleep 5
+      if [[ -n "$xy" ]]; then adb_tap $xy "Skip"; handled=1; sleep 5
       else
         xy="$(ui_query text "$DISMISS_REGEX" 0 || true)"
-        if [[ -n "$xy" ]]; then log "popup, tapping dismiss at $xy"; adb shell input tap $xy; handled=1; sleep 4; fi
+        if [[ -n "$xy" ]]; then adb_tap $xy "dismiss popup"; handled=1; sleep 4; fi
       fi
     fi
     [[ "$handled" == "0" ]] && { log "no prompt to tap (round $((i+1))/$rounds), waiting"; sleep 2; }
@@ -212,9 +212,9 @@ dismiss_notices() {
   local xy
   xy="$(ui_query text '^Close$' 0 || true)"
   if [[ -n "$xy" ]]; then
-    log "account notice on screen, tapping Close at $xy"; adb shell input tap $xy
+    adb_tap $xy "account notice: Close"
   else
-    log "account notice on screen, no Close button found -> Back key"; adb shell input keyevent 4
+    adb_key 4 "account notice: no Close button, Back key"
   fi
   sleep 3
 }
@@ -250,7 +250,7 @@ captcha_wait_loaded() {
       gen=1
       if ui_dump; then
         xy="$(ui_query text '^Generate new$' 0 || true)"
-        [[ -n "$xy" ]] && { log "captcha still blank, tapping 'Generate new' at $xy"; adb shell input tap $xy; }
+        [[ -n "$xy" ]] && { log "captcha still blank"; adb_tap $xy "Generate new"; }
       fi
     fi
     sleep 4
@@ -311,14 +311,14 @@ login_account() {
   fi
 
   tap_field 0 || { shot "04-no-form.png"; log "ERROR: login form not found"; return 1; }
-  sleep 0.5; type_text "$FB_IDENTIFIER"; sleep 0.5
+  sleep 0.5; adb_text "$FB_IDENTIFIER" "type identifier"; sleep 0.5
   tap_field 1 || { log "ERROR: password field not found"; return 1; }
-  sleep 0.5; type_text "$FB_PASSWORD"; sleep 0.5
+  sleep 0.5; adb_text "$FB_PASSWORD" "type password" 1; sleep 0.5   # mask=1: logs '********', never the real password
   shot "06-password-entered.png"   # password is masked
-  adb shell input keyevent 4 >/dev/null 2>&1; sleep 0.5
+  adb_key 4 "dismiss keyboard after password"; sleep 0.5
 
   phone_guard || return 1   # still on the phone IP right before submitting?
-  tap_text '^Log ?in$' "" 3 || adb shell input keyevent 66
+  tap_text '^Log ?in$' "" 3 || adb_key 66 "submit login (fallback: Enter key)"
   # poll (was: fixed 15s + 10s + 3s sleeps): stop as soon as the feed, a security check or a wrong password shows
   local t=$SECONDS bad="" xy feed=0
   sleep 3
@@ -346,7 +346,7 @@ login_account() {
     fi
     if grep -qiE "$NOTICE_REGEX" "$UI_XML"; then dismiss_notices; continue; fi     # "What happened" / restrictions page
     xy="$(ui_query text '^(Save|OK)$' 0 || true)"     # "Save your login info?"
-    if [[ -n "$xy" ]]; then log "tapping Save/OK at $xy"; adb shell input tap $xy; sleep 1; continue; fi
+    if [[ -n "$xy" ]]; then adb_tap $xy "Save/OK"; sleep 1; continue; fi
     logged_in_xml && { log "feed detected after $((SECONDS - t))s"; feed=1; break; }
     sleep 0.5
   done

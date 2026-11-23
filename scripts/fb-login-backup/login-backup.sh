@@ -20,7 +20,11 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/../shared/config.sh"
 exec > >(tee -a "$ARTIFACTS/run.log") 2>&1
-for f in lib-ui lib-mega lib-captcha; do source "$DIR/../shared/$f.sh"; done
+for f in lib-ui lib-mega lib-captcha; do
+  p="$DIR/../shared/$f.sh"
+  [[ -f "$p" ]] || { echo "FATAL: required file missing: $p (it must exist in the repo at scripts/shared/$f.sh)"; exit 1; }
+  source "$p"
+done
 
 ACCOUNTS_JSON="${ACCOUNTS_JSON:-}"
 MEGA_KEEP="${MEGA_KEEP:-10}"

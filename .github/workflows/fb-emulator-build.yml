@@ -15,7 +15,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # Was 40: the hardened install-facebook.sh can now retry the save-and-verify cycle up to 3 times
+    # (each retry = a full reboot + up to ~420s boot wait + up to ~90s pm wait) before giving up, which
+    # can legitimately take longer than the old blind single-shot version. Bumped so a slow-but-working
+    # verification run isn't killed by the job timeout before it gets a fair chance to pass.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 

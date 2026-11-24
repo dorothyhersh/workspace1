@@ -111,6 +111,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/shared/restore-emulator.sh
 
+      # ---- 1b. install audio/video tools on the runner's own fast connection, BEFORE routing through the exit node ----
+      # (through the exit node this apt install took ~15 min; the script's own install then becomes a no-op)
+      - name: Pre-install pulseaudio + ffmpeg (before the exit node)
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pulseaudio ffmpeg
+
       # ---- 2a. exit node (own step: hard 4 min limit, so a stuck tailscale can never block the job) ----
       - name: Route traffic through the GitHub-runner exit node
         timeout-minutes: 4
@@ -141,7 +149,18 @@ jobs:
           CAPTCHA_TAP_ONLY: '1'           # 1 (debug) = just tap + screenshot every attempt, NO recording. 0 = also record wav/mp3/mp4
           CAPTCHA_AUDIO_SECONDS: '20'     # only used once CAPTCHA_TAP_ONLY=0
           CAPTCHA_AUDIO_TAP: '727 837'    # last-resort fallback tap if no detection method finds the button
-        run: bash scripts/shared/run-with-emulator.sh bash scripts/fb-login-backup/login-backup.sh
+        run: |
+          # The scripts write to artifacts/run.log; follow it live so the step log fills in while running.
+          mkdir -p artifacts
+          touch artifacts/run.log
+          tail -n +1 -F artifacts/run.log 2>/dev/null &
+          TAIL_PID=$!
+          set +e
+          bash scripts/shared/run-with-emulator.sh bash scripts/fb-login-backup/login-backup.sh
+          RC=$?
+          sleep 3
+          kill "$TAIL_PID" 2>/dev/null
+          exit "$RC"
 
       # Insurance: login-backup.sh already switches the exit node off itself before its own Mega
       # upload (switch_to_runner_ip in the script), but this step runs regardless of whether that

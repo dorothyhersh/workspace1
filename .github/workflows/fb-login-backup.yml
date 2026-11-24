@@ -58,6 +58,15 @@ jobs:
           oauth-secret: ${{ env.TS_OAUTH_SECRET }}
           tags: tag:ci
 
+      - name: Verify Tailscale is connected (fail fast)
+        run: |
+          STATE=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("BackendState",""))' || true)
+          echo "Tailscale state: ${STATE:-unknown}"
+          if [ "$STATE" != "Running" ]; then
+            echo "::error::Tailscale did not connect (state: ${STATE:-unknown}). Check TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET in the Mega sheet: they must be a valid OAuth client with Auth Keys: Write and tag:ci, in the same tailnet as the Exit Node workflow."
+            exit 1
+          fi
+
       - name: Record baseline IP (runner's own IP, before the exit node)
         run: echo "BASELINE_IP=$(curl -s --max-time 20 https://ifconfig.me)" | tee -a $GITHUB_ENV
 
@@ -71,7 +80,7 @@ jobs:
           import json, os, sys
           prefix = os.environ["EXIT_NODE_HOSTNAME"]
           d = json.load(sys.stdin)
-          for p in d.get("Peer", {}).values():
+          for p in (d.get("Peer") or {}).values():
               if p.get("HostName", "").startswith(prefix) and p.get("ExitNodeOption") and p.get("Online"):
                   print(p["TailscaleIPs"][0])
                   break

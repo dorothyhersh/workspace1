@@ -1,4 +1,4 @@
-name: FB - Login every account separately (phone IP), backup each to Mega, update sheet
+name: FB - Login every account separately (GitHub runner exit node), backup each to Mega, update sheet
 
 on:
   workflow_dispatch:
@@ -18,7 +18,9 @@ permissions:
   actions: read
 
 env:
-  PHONE_IP: 100.71.118.35
+  # PHONE_IP is no longer hardcoded: the "Find the GitHub-runner exit node" step sets it
+  # (via $GITHUB_ENV) to the current Tailscale IP of the running "gh-exit-node" runner.
+  EXIT_NODE_HOSTNAME: gh-exit-node
   MEGA_CONF_FOLDER: Fbworkflow
   MEGA_CONF_FILE: login_Setup_Setting_workflow_conf.xlsx
   MEGA_REMOTE: mega          # must be the remote name inside your RCLONE_CONF (scripts/shared/config.sh uses the same)
@@ -56,8 +58,35 @@ jobs:
           oauth-secret: ${{ env.TS_OAUTH_SECRET }}
           tags: tag:ci
 
-      - name: Record baseline IP (runner's own IP, before the phone)
+      - name: Record baseline IP (runner's own IP, before the exit node)
         run: echo "BASELINE_IP=$(curl -s --max-time 20 https://ifconfig.me)" | tee -a $GITHUB_ENV
+
+      # ---- NEW: find the running GitHub-runner exit node and use its Tailscale IP ----
+      # Requires the separate "Exit Node" workflow to be running (it advertises hostname gh-exit-node).
+      - name: Find the GitHub-runner exit node (gh-exit-node)
+        run: |
+          IP=""
+          for i in $(seq 1 45); do
+            IP=$(tailscale status --json | EXIT_NODE_HOSTNAME="$EXIT_NODE_HOSTNAME" python3 -c '
+          import json, os, sys
+          prefix = os.environ["EXIT_NODE_HOSTNAME"]
+          d = json.load(sys.stdin)
+          for p in d.get("Peer", {}).values():
+              if p.get("HostName", "").startswith(prefix) and p.get("ExitNodeOption") and p.get("Online"):
+                  print(p["TailscaleIPs"][0])
+                  break
+          ')
+            [ -n "$IP" ] && break
+            echo "waiting for an online ${EXIT_NODE_HOSTNAME} exit node... ($i/45)"
+            sleep 2
+          done
+          if [ -z "$IP" ]; then
+            echo "::error::No online ${EXIT_NODE_HOSTNAME} exit node found. Start the 'Exit Node' workflow first and wait until it prints its IPs."
+            tailscale status || true
+            exit 1
+          fi
+          echo "Found exit node at $IP"
+          echo "PHONE_IP=$IP" | tee -a "$GITHUB_ENV"
 
       - name: Enable KVM
         run: |
@@ -72,8 +101,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/shared/restore-emulator.sh
 
-      # ---- 2a. phone exit node (own step: hard 4 min limit, so a stuck tailscale can never block the job) ----
-      - name: Route traffic through the phone (exit node)
+      # ---- 2a. exit node (own step: hard 4 min limit, so a stuck tailscale can never block the job) ----
+      - name: Route traffic through the GitHub-runner exit node
         timeout-minutes: 4
         env:
           PHONE_IP: ${{ env.PHONE_IP }}
@@ -87,7 +116,9 @@ jobs:
           PYTHONUNBUFFERED: '1'
           PHONE_IP: ${{ env.PHONE_IP }}
           BASELINE_IP: ${{ env.BASELINE_IP }}
-          EXPECTED_PHONE_IP: ${{ secrets.EXPECTED_PHONE_IP }}
+          # The old secret held your real phone's public IP. The exit node is now a GitHub runner,
+          # so that check would fail. Left empty on purpose (see note in the chat).
+          EXPECTED_PHONE_IP: ''
           PACKAGE_NAME: com.facebook.katana
           ACCOUNTS_JSON: ${{ env.ACCOUNTS_JSON }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
@@ -105,8 +136,8 @@ jobs:
       # Insurance: login-backup.sh already switches the exit node off itself before its own Mega
       # upload (switch_to_runner_ip in the script), but this step runs regardless of whether that
       # succeeded, and *before* the two upload-artifact steps below - so screenshots/logs/captcha
-      # files always go to GitHub over the runner's own IP, never routed through the phone.
-      - name: Switch off phone exit node (use runner's own IP for GitHub artifact uploads)
+      # files always go to GitHub over the runner's own IP, never routed through the exit node.
+      - name: Switch off exit node (use runner's own IP for GitHub artifact uploads)
         if: always()
         run: |
           echo "tailscale status BEFORE:"; timeout 15 tailscale status || true

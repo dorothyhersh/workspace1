@@ -71,36 +71,31 @@ jobs:
       - name: Record baseline IP (runner's own IP, before the exit node)
         run: echo "BASELINE_IP=$(curl -s --max-time 20 https://ifconfig.me)" | tee -a $GITHUB_ENV
 
-      # ---- Find ALL running GitHub-runner exit nodes, then pick ONE at random ----
-      # Requires at least one "Exit Node" workflow to be running (hostname starting with one of
-      # the EXIT_NODE_HOSTNAME prefixes). If several are online, a different one may be picked
-      # on each run of this login workflow.
-      - name: Find exit nodes and pick one at random
+      # ---- NEW: find the running GitHub-runner exit node and use its Tailscale IP ----
+      # Requires the separate "Exit Node" workflow to be running (it advertises hostname gh-exit-node).
+      - name: Find the GitHub-runner exit node (gh-exit-node)
         run: |
-          IPS=""
+          IP=""
           for i in $(seq 1 45); do
-            IPS=$(tailscale status --json | EXIT_NODE_HOSTNAME="$EXIT_NODE_HOSTNAME" python3 -c '
+            IP=$(tailscale status --json | EXIT_NODE_HOSTNAME="$EXIT_NODE_HOSTNAME" python3 -c '
           import json, os, sys
           prefixes = tuple(x.strip() for x in os.environ["EXIT_NODE_HOSTNAME"].split(",") if x.strip())
           d = json.load(sys.stdin)
-          ips = []
           for p in (d.get("Peer") or {}).values():
               if (p.get("HostName", "").startswith(prefixes) or p.get("DNSName", "").startswith(prefixes)) and p.get("ExitNodeOption") and p.get("Online"):
-                  ips.append(p["TailscaleIPs"][0])
-          print(" ".join(ips))
+                  print(p["TailscaleIPs"][0])
+                  break
           ')
-            [ -n "$IPS" ] && break
-            echo "waiting for an online exit node (prefixes: ${EXIT_NODE_HOSTNAME})... ($i/45)"
+            [ -n "$IP" ] && break
+            echo "waiting for an online ${EXIT_NODE_HOSTNAME} exit node... ($i/45)"
             sleep 2
           done
-          if [ -z "$IPS" ]; then
-            echo "::error::No online exit node found (prefixes: ${EXIT_NODE_HOSTNAME}). Start at least one 'Exit Node' workflow first and wait until it prints its IP."
+          if [ -z "$IP" ]; then
+            echo "::error::No online ${EXIT_NODE_HOSTNAME} exit node found. Start the 'Exit Node' workflow first and wait until it prints its IPs."
             tailscale status || true
             exit 1
           fi
-          echo "Online exit nodes found: $IPS"
-          IP=$(python3 -c "import random,sys; print(random.choice(sys.argv[1].split()))" "$IPS")
-          echo "Randomly picked exit node: $IP"
+          echo "Found exit node at $IP"
           echo "PHONE_IP=$IP" | tee -a "$GITHUB_ENV"
 
       - name: Enable KVM

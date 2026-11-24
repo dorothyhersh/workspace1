@@ -18,7 +18,7 @@ permissions:
   actions: read
 
 env:
-  PHONE_IP: 100.85.72.32
+  PHONE_IP: 100.71.118.35
   MEGA_CONF_FOLDER: Fbworkflow
   MEGA_CONF_FILE: login_Setup_Setting_workflow_conf.xlsx
   MEGA_REMOTE: mega          # must be the remote name inside your RCLONE_CONF (scripts/shared/config.sh uses the same)

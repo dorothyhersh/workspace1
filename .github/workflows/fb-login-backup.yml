@@ -20,7 +20,7 @@ permissions:
 env:
   # PHONE_IP is no longer hardcoded: the "Find the GitHub-runner exit node" step sets it
   # (via $GITHUB_ENV) to the current Tailscale IP of the running "gh-exit-node" runner.
-  EXIT_NODE_HOSTNAME: gh-exit-node
+  EXIT_NODE_HOSTNAME: gh-exit-node,gh-win-exitnode   # comma-separated hostname prefixes (Linux and Windows exit node workflows)
   MEGA_CONF_FOLDER: Fbworkflow
   MEGA_CONF_FILE: login_Setup_Setting_workflow_conf.xlsx
   MEGA_REMOTE: mega          # must be the remote name inside your RCLONE_CONF (scripts/shared/config.sh uses the same)
@@ -79,10 +79,10 @@ jobs:
           for i in $(seq 1 45); do
             IP=$(tailscale status --json | EXIT_NODE_HOSTNAME="$EXIT_NODE_HOSTNAME" python3 -c '
           import json, os, sys
-          prefix = os.environ["EXIT_NODE_HOSTNAME"]
+          prefixes = tuple(x.strip() for x in os.environ["EXIT_NODE_HOSTNAME"].split(",") if x.strip())
           d = json.load(sys.stdin)
           for p in (d.get("Peer") or {}).values():
-              if p.get("HostName", "").startswith(prefix) and p.get("ExitNodeOption") and p.get("Online"):
+              if (p.get("HostName", "").startswith(prefixes) or p.get("DNSName", "").startswith(prefixes)) and p.get("ExitNodeOption") and p.get("Online"):
                   print(p["TailscaleIPs"][0])
                   break
           ')
@@ -141,18 +141,7 @@ jobs:
           CAPTCHA_TAP_ONLY: '1'           # 1 (debug) = just tap + screenshot every attempt, NO recording. 0 = also record wav/mp3/mp4
           CAPTCHA_AUDIO_SECONDS: '20'     # only used once CAPTCHA_TAP_ONLY=0
           CAPTCHA_AUDIO_TAP: '727 837'    # last-resort fallback tap if no detection method finds the button
-        run: |
-          # The scripts write to artifacts/run.log; follow it live so the step log fills in while running.
-          mkdir -p artifacts
-          touch artifacts/run.log
-          tail -n +1 -F artifacts/run.log 2>/dev/null &
-          TAIL_PID=$!
-          set +e
-          bash scripts/shared/run-with-emulator.sh bash scripts/fb-login-backup/login-backup.sh
-          RC=$?
-          sleep 3
-          kill "$TAIL_PID" 2>/dev/null
-          exit "$RC"
+        run: bash scripts/shared/run-with-emulator.sh bash scripts/fb-login-backup/login-backup.sh
 
       # Insurance: login-backup.sh already switches the exit node off itself before its own Mega
       # upload (switch_to_runner_ip in the script), but this step runs regardless of whether that

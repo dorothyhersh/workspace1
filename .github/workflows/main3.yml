@@ -1,36 +1,83 @@
-name: Emulator Screenshots - Infinix Smart 8 Plus Screen Profile
+name: Emulator Screenshots - Device Profile Spoof
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
     inputs:
-      model:
-        description: "Device model to show in About phone"
+      device:
+        description: "Device to spoof"
+        type: choice
         default: "Infinix Smart 8 Plus"
-      brand:
-        description: "Brand"
-        default: "Infinix"
-      manufacturer:
-        description: "Manufacturer"
-        default: "INFINIX"
+        options:
+          - "Infinix Smart 8 Plus"
+          - "Infinix Hot 40 Pro"
+          - "Infinix Note 30"
+          - "Samsung Galaxy S24 Ultra"
+          - "Samsung Galaxy S23"
+          - "Samsung Galaxy A54 5G"
+          - "Samsung Galaxy A15"
+          - "Samsung Galaxy M34 5G"
+          - "vivo V29"
+          - "vivo V27"
+          - "vivo Y36"
+          - "vivo Y27"
+          - "vivo X90 Pro"
       build_number:
-        description: "Build number to show in About phone (no | or & characters)"
-        default: "X6526-H894A-U-GL-240115V1"
+        description: "Optional: override Build number (leave empty to use the preset; avoid | and &)"
+        required: false
+        default: ""
 
 jobs:
   emulator-screenshots:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
-      DEVICE_MODEL: ${{ github.event.inputs.model || 'Infinix Smart 8 Plus' }}
-      DEVICE_BRAND: ${{ github.event.inputs.brand || 'Infinix' }}
-      DEVICE_MANUF: ${{ github.event.inputs.manufacturer || 'INFINIX' }}
-      DEVICE_BUILD: ${{ github.event.inputs.build_number || 'X6526-H894A-U-GL-240115V1' }}
+      CHOICE: ${{ github.event.inputs.device || 'Infinix Smart 8 Plus' }}
+      BUILD_OVERRIDE: ${{ github.event.inputs.build_number }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve device profile
+        run: |
+          # fields: marketing name|model|brand|manufacturer|build number|product name|device codename|width|height|density
+          # NOTE: model codes / build strings are plausible presets, not verified factory values.
+          case "$CHOICE" in
+            "Infinix Smart 8 Plus")     P="Infinix Smart 8 Plus|Infinix Smart 8 Plus|Infinix|INFINIX|X6526-H894A-U-GL-240115V1|X6526-GL|Infinix-X6526|720|1612|270" ;;
+            "Infinix Hot 40 Pro")       P="Infinix Hot 40 Pro|Infinix Hot 40 Pro|Infinix|INFINIX|X6837-H8917ABCD-U-GL-240102V1|X6837-GL|Infinix-X6837|1080|2460|400" ;;
+            "Infinix Note 30")          P="Infinix Note 30|Infinix Note 30|Infinix|INFINIX|X6833B-H8915-U-GL-231010V1|X6833B-GL|Infinix-X6833B|1080|2460|400" ;;
+            "Samsung Galaxy S24 Ultra") P="Galaxy S24 Ultra|SM-S928B|samsung|samsung|UP1A.231005.007.S928BXXU1AXBA|e3qxxx|e3q|1080|2340|420" ;;
+            "Samsung Galaxy S23")       P="Galaxy S23|SM-S911B|samsung|samsung|TP1A.220624.014.S911BXXU2BWLA|dm1qxxx|dm1q|1080|2340|420" ;;
+            "Samsung Galaxy A54 5G")    P="Galaxy A54 5G|SM-A546E|samsung|samsung|TP1A.220624.014.A546EXXU5CXA1|a54xnsxx|a54x|1080|2340|400" ;;
+            "Samsung Galaxy A15")       P="Galaxy A15|SM-A155F|samsung|samsung|UP1A.231005.007.A155FXXU2AXB1|a15xx|a15|1080|2340|400" ;;
+            "Samsung Galaxy M34 5G")    P="Galaxy M34 5G|SM-M346B|samsung|samsung|TP1A.220624.014.M346BXXU3AWK1|m34xnsxx|m34x|1080|2340|400" ;;
+            "vivo V29")                 P="vivo V29|V2250|vivo|vivo|V2250_A_1.9.12.1|V2250|V2250|1080|2400|400" ;;
+            "vivo V27")                 P="vivo V27|V2231|vivo|vivo|V2231_A_1.8.6.3|V2231|V2231|1080|2400|400" ;;
+            "vivo Y36")                 P="vivo Y36|V2247|vivo|vivo|V2247_A_1.5.10.2|V2247|V2247|1080|2408|400" ;;
+            "vivo Y27")                 P="vivo Y27|V2249|vivo|vivo|V2249_A_1.4.8.1|V2249|V2249|1080|2388|400" ;;
+            "vivo X90 Pro")             P="vivo X90 Pro|V2242|vivo|vivo|V2242_A_1.9.7.4|V2242|V2242|1080|2400|420" ;;
+            *) echo "Unknown device: $CHOICE"; exit 1 ;;
+          esac
+          IFS='|' read -r MARKET MODEL BRAND MANUF BUILD PNAME CODE W H D <<< "$P"
+          if [ -n "${BUILD_OVERRIDE:-}" ]; then BUILD="$BUILD_OVERRIDE"; fi
+          {
+            echo "DEVICE_MARKET=$MARKET"
+            echo "DEVICE_MODEL=$MODEL"
+            echo "DEVICE_BRAND=$BRAND"
+            echo "DEVICE_MANUF=$MANUF"
+            echo "DEVICE_BUILD=$BUILD"
+            echo "DEVICE_PNAME=$PNAME"
+            echo "DEVICE_CODE=$CODE"
+            echo "SCREEN_W=$W"
+            echo "SCREEN_H=$H"
+            echo "SCREEN_DPI=$D"
+            echo "SWIPE_X=$((W/2))"
+            echo "SWIPE_Y1=$((H*80/100))"
+            echo "SWIPE_Y2=$((H*30/100))"
+          } >> "$GITHUB_ENV"
+          echo "Selected: $CHOICE -> $P (build: $BUILD)"
 
       - name: Enable KVM
         run: |
@@ -41,9 +88,29 @@ jobs:
       - name: Install Python deps for DevTools capture
         run: pip install websocket-client
 
-      - name: Create set-model script
+      - name: Create helper scripts
         run: |
           mkdir -p scripts
+
+          # ---------- AVD hardware identity (replaces Pixel/Google labels in AVD config) ----------
+          cat > scripts/patch-avd.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -uo pipefail
+          CFG="$HOME/.android/avd/test.avd/config.ini"
+          [ -f "$CFG" ] || { echo "AVD config not found: $CFG"; exit 0; }
+          setkey() {
+            if grep -q "^$1=" "$CFG"; then sed -i "s|^$1=.*|$1=$2|" "$CFG"; else echo "$1=$2" >> "$CFG"; fi
+          }
+          setkey hw.device.manufacturer "$DEVICE_MANUF"
+          setkey hw.device.name "$DEVICE_MARKET"
+          setkey hw.lcd.width "$SCREEN_W"
+          setkey hw.lcd.height "$SCREEN_H"
+          setkey hw.lcd.density "$SCREEN_DPI"
+          echo "== Patched AVD config =="
+          grep -E '^(hw.device|hw.lcd)' "$CFG"
+          SCRIPT
+
+          # ---------- build.prop spoof ----------
           cat > scripts/set-model.sh <<'SCRIPT'
           #!/usr/bin/env bash
           set -uo pipefail
@@ -52,6 +119,10 @@ jobs:
           BRAND="${2:-Infinix}"
           MANUF="${3:-INFINIX}"
           BUILD="${4:-X6526-H894A-U-GL-240115V1}"
+          PNAME="${5:-X6526-GL}"
+          CODE="${6:-Infinix-X6526}"
+          MARKET="${7:-$MODEL}"
+          FP="${BRAND}/${PNAME}/${CODE}:13/TP1A.220624.014/${BUILD}:user/release-keys"
 
           wait_boot() {
             sleep 5
@@ -63,7 +134,7 @@ jobs:
             sleep 5
           }
 
-          echo "== Patching model to: $MODEL / $BRAND / $MANUF / build: $BUILD =="
+          echo "== Patching: $MARKET / $MODEL / $BRAND / $MANUF / build $BUILD / $PNAME / $CODE =="
 
           # Runs on the device as root. Finds every build.prop on every partition.
           cat > /tmp/patch.sh <<EOF
@@ -72,10 +143,16 @@ jobs:
               -e 's|^(ro\.product\.([a-z_]+\.)?model)=.*|\1=${MODEL}|' \\
               -e 's|^(ro\.product\.([a-z_]+\.)?brand)=.*|\1=${BRAND}|' \\
               -e 's|^(ro\.product\.([a-z_]+\.)?manufacturer)=.*|\1=${MANUF}|' \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?name)=.*|\1=${PNAME}|' \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?device)=.*|\1=${CODE}|' \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?marketname)=.*|\1=${MARKET}|' \\
               -e 's|^(ro\.build\.display\.id)=.*|\1=${BUILD}|' \\
+              -e 's|^(ro\.build\.fingerprint)=.*|\1=${FP}|' \\
+              -e 's|^(ro\.build\.description)=.*|\1=${PNAME}-user 13 TP1A.220624.014 ${BUILD} release-keys|' \\
               "\$f"
-            grep -H -E '^ro\.product\.([a-z_]+\.)?(model|brand|manufacturer)=|^ro\.build\.display\.id=' "\$f"
+            grep -H -E '^ro\.product\.([a-z_]+\.)?(model|brand|manufacturer|name|device|marketname)=|^ro\.build\.(display\.id|fingerprint)=' "\$f"
           done
+          grep -q '^ro\.product\.marketname=' /system/build.prop || echo "ro.product.marketname=${MARKET}" >> /system/build.prop
           echo "source_order: \$(getprop ro.product.property_source_order)"
           EOF
 
@@ -95,19 +172,20 @@ jobs:
           adb shell getprop ro.product.model
           adb shell getprop ro.product.brand
           adb shell getprop ro.product.manufacturer
+          adb shell getprop ro.product.name
+          adb shell getprop ro.product.device
           adb shell getprop ro.build.display.id
+          adb shell getprop ro.build.fingerprint
           SCRIPT
-          chmod +x scripts/set-model.sh
 
-      - name: Create Chrome + deviceinfo.me scripts
-        run: |
-          mkdir -p scripts
+          # ---------- Chrome + deviceinfo.me ----------
           cat > scripts/chrome-deviceinfo.sh <<'SCRIPT'
           #!/usr/bin/env bash
           set -uo pipefail
 
           URL="https://www.deviceinfo.me/"
           OUT="screenshots"
+          SX="${SWIPE_X:-360}"; SY1="${SWIPE_Y1:-1300}"; SY2="${SWIPE_Y2:-500}"
           mkdir -p "$OUT"
 
           PKG=""
@@ -121,6 +199,9 @@ jobs:
           fi
           echo "Using Chrome package: $PKG"
 
+          # Don't let ANR / crash dialogs cover Chrome on the slow emulator
+          adb shell settings put global hide_error_dialogs 1
+
           # Skip first-run screens (works on userdebug emulator images)
           adb shell "echo '_ --no-first-run --disable-fre --no-default-browser-check --disable-notifications' > /data/local/tmp/chrome-command-line"
           adb shell chmod 755 /data/local/tmp/chrome-command-line
@@ -129,15 +210,44 @@ jobs:
 
           adb shell input keyevent KEYCODE_WAKEUP
           adb shell am start -a android.intent.action.VIEW -d "$URL" -p "$PKG"
-          sleep 20
+          sleep 25
           adb exec-out screencap -p > "$OUT/07_chrome_deviceinfo_viewport.png"
 
-          # Chrome DevTools over adb for a true full-page capture
-          adb forward tcp:9222 localabstract:chrome_devtools_remote
-          python3 scripts/devtools_fullpage.py "$OUT"
-          adb forward --remove tcp:9222 || true
+          echo "Chrome pid(s): $(adb shell pidof "$PKG" | tr -d '\r')"
+
+          # Find the real DevTools socket name instead of assuming it
+          SOCK=""
+          for i in $(seq 1 30); do
+            ALL=$(adb shell cat /proc/net/unix | tr -d '\r' | grep -o '@[A-Za-z_]*devtools_remote[A-Za-z_0-9]*' | sort -u)
+            SOCK=$(echo "$ALL" | grep '^@chrome' | head -n1)
+            [ -z "$SOCK" ] && SOCK=$(echo "$ALL" | head -n1)
+            [ -n "$SOCK" ] && break
+            sleep 2
+          done
+          echo "DevTools socket: ${SOCK:-<none found>}"
+
+          OK=0
+          if [ -n "$SOCK" ]; then
+            adb forward tcp:9222 "localabstract:${SOCK#@}"
+            python3 scripts/devtools_fullpage.py "$OUT" && OK=1
+            adb forward --remove tcp:9222 || true
+          else
+            echo "--- recent Chrome-related logcat ---"
+            adb logcat -d | grep -i -E 'chrome|AndroidRuntime|FATAL|ANR' | tail -n 60
+          fi
+
+          if [ "$OK" != "1" ]; then
+            echo "DevTools capture failed - falling back to scrolled screenshots"
+            adb shell am start -a android.intent.action.VIEW -d "$URL" -p "$PKG"
+            sleep 20
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              adb exec-out screencap -p > "$OUT/08_deviceinfo_scroll_$(printf '%02d' "$i").png"
+              adb shell input swipe "$SX" "$SY1" "$SX" "$SY2" 500
+              sleep 2
+            done
+          fi
           SCRIPT
-          chmod +x scripts/chrome-deviceinfo.sh
+          chmod +x scripts/*.sh
 
           cat > scripts/devtools_fullpage.py <<'PY'
           import base64
@@ -154,9 +264,9 @@ jobs:
           SCALE = 1.5
 
           tabs = []
-          for _ in range(30):
+          for _ in range(15):
               try:
-                  tabs = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json"))
+                  tabs = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=10))
                   if tabs:
                       break
               except Exception as e:
@@ -190,14 +300,12 @@ jobs:
               return r.get("result", {}).get("value")
 
 
-          # Wait for the page to finish loading, then let the JS tests run
           for _ in range(60):
               if js("document.readyState") == "complete":
                   break
               time.sleep(1)
           time.sleep(20)
 
-          # Scroll through the page to trigger lazy-loaded sections
           height = js("document.documentElement.scrollHeight") or 0
           y = 0
           while y < height:
@@ -209,7 +317,6 @@ jobs:
           js("window.scrollTo(0, 0)")
           time.sleep(2)
 
-          # Save all visible text from the page too
           text = js("document.body.innerText") or ""
           with open(f"{OUT}/deviceinfo_text.txt", "w", encoding="utf-8") as f:
               f.write(text)
@@ -255,20 +362,22 @@ jobs:
           ram-size: 4096M
           disk-size: 8G
           cores: 2
+          pre-emulator-launch-script: |
+            bash scripts/patch-avd.sh
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -no-metrics -writable-system
           disable-animations: true
           script: |
             mkdir -p screenshots
-            bash scripts/set-model.sh "$DEVICE_MODEL" "$DEVICE_BRAND" "$DEVICE_MANUF" "$DEVICE_BUILD" > screenshots/set_model_log.txt 2>&1 || echo "Model patch failed, continuing with default model"
+            bash scripts/set-model.sh "$DEVICE_MODEL" "$DEVICE_BRAND" "$DEVICE_MANUF" "$DEVICE_BUILD" "$DEVICE_PNAME" "$DEVICE_CODE" "$DEVICE_MARKET" > screenshots/set_model_log.txt 2>&1 || echo "Model patch failed, continuing with default model"
             cat screenshots/set_model_log.txt
-            adb shell "settings put global device_name '$DEVICE_MODEL'" || echo "device_name failed"
+            adb shell "settings put global device_name '$DEVICE_MARKET'" || echo "device_name failed"
 
             adb shell settings put secure immersive_mode_confirmations confirmed
             adb shell settings put global policy_control immersive.full=*
             adb shell settings put global policy_control null
             adb shell settings put secure show_ime_with_hard_keyboard 0
-            adb shell wm size 720x1612
-            adb shell wm density 270
+            adb shell wm size ${SCREEN_W}x${SCREEN_H}
+            adb shell wm density ${SCREEN_DPI}
             sleep 10
 
             adb shell input keyevent KEYCODE_WAKEUP
@@ -285,11 +394,11 @@ jobs:
             sleep 8
             adb exec-out screencap -p > screenshots/03_about_phone_top.png
 
-            adb shell input swipe 360 1300 360 500 400
+            adb shell input swipe ${SWIPE_X} ${SWIPE_Y1} ${SWIPE_X} ${SWIPE_Y2} 400
             sleep 3
             adb exec-out screencap -p > screenshots/04_about_phone_scrolled.png
 
-            adb shell input swipe 360 1300 360 500 400
+            adb shell input swipe ${SWIPE_X} ${SWIPE_Y1} ${SWIPE_X} ${SWIPE_Y2} 400
             sleep 3
             adb exec-out screencap -p > screenshots/05_about_phone_scrolled_more.png
 

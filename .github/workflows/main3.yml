@@ -1,0 +1,321 @@
+name: Emulator Screenshots - Infinix Smart 8 Plus Screen Profile
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Device model to show in About phone"
+        default: "Infinix Smart 8 Plus"
+      brand:
+        description: "Brand"
+        default: "Infinix"
+      manufacturer:
+        description: "Manufacturer"
+        default: "INFINIX"
+      build_number:
+        description: "Build number to show in About phone (no | or & characters)"
+        default: "X6526-H894A-U-GL-240115V1"
+
+jobs:
+  emulator-screenshots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DEVICE_MODEL: ${{ github.event.inputs.model || 'Infinix Smart 8 Plus' }}
+      DEVICE_BRAND: ${{ github.event.inputs.brand || 'Infinix' }}
+      DEVICE_MANUF: ${{ github.event.inputs.manufacturer || 'INFINIX' }}
+      DEVICE_BUILD: ${{ github.event.inputs.build_number || 'X6526-H894A-U-GL-240115V1' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install Python deps for DevTools capture
+        run: pip install websocket-client
+
+      - name: Create set-model script
+        run: |
+          mkdir -p scripts
+          cat > scripts/set-model.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -uo pipefail
+
+          MODEL="${1:-Infinix Smart 8 Plus}"
+          BRAND="${2:-Infinix}"
+          MANUF="${3:-INFINIX}"
+          BUILD="${4:-X6526-H894A-U-GL-240115V1}"
+
+          wait_boot() {
+            sleep 5
+            adb wait-for-device
+            local n=0
+            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+              sleep 2; n=$((n+1)); [ "$n" -gt 120 ] && { echo "boot timeout"; return 1; }
+            done
+            sleep 5
+          }
+
+          echo "== Patching model to: $MODEL / $BRAND / $MANUF / build: $BUILD =="
+
+          # Runs on the device as root. Finds every build.prop on every partition.
+          cat > /tmp/patch.sh <<EOF
+          for f in \$(find /system /system_ext /product /vendor /odm -maxdepth 3 -type f -name build.prop 2>/dev/null); do
+            sed -i -E \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?model)=.*|\1=${MODEL}|' \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?brand)=.*|\1=${BRAND}|' \\
+              -e 's|^(ro\.product\.([a-z_]+\.)?manufacturer)=.*|\1=${MANUF}|' \\
+              -e 's|^(ro\.build\.display\.id)=.*|\1=${BUILD}|' \\
+              "\$f"
+            grep -H -E '^ro\.product\.([a-z_]+\.)?(model|brand|manufacturer)=|^ro\.build\.display\.id=' "\$f"
+          done
+          echo "source_order: \$(getprop ro.product.property_source_order)"
+          EOF
+
+          adb root; sleep 3
+          adb disable-verity
+          adb reboot; wait_boot || exit 1
+          adb root; sleep 3
+          adb remount || { echo "remount failed"; exit 1; }
+
+          adb push /tmp/patch.sh /data/local/tmp/patch.sh
+          echo "== Files patched =="
+          adb shell sh /data/local/tmp/patch.sh
+
+          adb reboot; wait_boot || exit 1
+
+          echo "== Result =="
+          adb shell getprop ro.product.model
+          adb shell getprop ro.product.brand
+          adb shell getprop ro.product.manufacturer
+          adb shell getprop ro.build.display.id
+          SCRIPT
+          chmod +x scripts/set-model.sh
+
+      - name: Create Chrome + deviceinfo.me scripts
+        run: |
+          mkdir -p scripts
+          cat > scripts/chrome-deviceinfo.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -uo pipefail
+
+          URL="https://www.deviceinfo.me/"
+          OUT="screenshots"
+          mkdir -p "$OUT"
+
+          PKG=""
+          for p in com.android.chrome org.chromium.chrome com.chrome.beta; do
+            if adb shell pm list packages "$p" | tr -d '\r' | grep -q "package:$p$"; then PKG="$p"; break; fi
+          done
+          if [ -z "$PKG" ]; then
+            echo "Chrome is not installed in this system image. Browser-like packages:"
+            adb shell pm list packages | grep -i -E 'chrome|browser|webview'
+            exit 1
+          fi
+          echo "Using Chrome package: $PKG"
+
+          # Skip first-run screens (works on userdebug emulator images)
+          adb shell "echo '_ --no-first-run --disable-fre --no-default-browser-check --disable-notifications' > /data/local/tmp/chrome-command-line"
+          adb shell chmod 755 /data/local/tmp/chrome-command-line
+          adb shell am force-stop "$PKG"
+          adb shell pm clear "$PKG"
+
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell am start -a android.intent.action.VIEW -d "$URL" -p "$PKG"
+          sleep 20
+          adb exec-out screencap -p > "$OUT/07_chrome_deviceinfo_viewport.png"
+
+          # Chrome DevTools over adb for a true full-page capture
+          adb forward tcp:9222 localabstract:chrome_devtools_remote
+          python3 scripts/devtools_fullpage.py "$OUT"
+          adb forward --remove tcp:9222 || true
+          SCRIPT
+          chmod +x scripts/chrome-deviceinfo.sh
+
+          cat > scripts/devtools_fullpage.py <<'PY'
+          import base64
+          import json
+          import sys
+          import time
+          import urllib.request
+
+          from websocket import create_connection
+
+          OUT = sys.argv[1] if len(sys.argv) > 1 else "screenshots"
+          CHUNK_CSS_PX = 6000
+          MAX_CSS_PX = 60000
+          SCALE = 1.5
+
+          tabs = []
+          for _ in range(30):
+              try:
+                  tabs = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json"))
+                  if tabs:
+                      break
+              except Exception as e:
+                  print("waiting for devtools:", e)
+              time.sleep(2)
+
+          pages = [t for t in tabs if t.get("type") == "page"]
+          page = next((t for t in pages if "deviceinfo" in t.get("url", "")), None) or (pages[0] if pages else None)
+          if not page:
+              sys.exit("no page tab found")
+          print("Attaching to:", page.get("url"))
+
+          ws = create_connection(page["webSocketDebuggerUrl"], suppress_origin=True, timeout=90)
+          _id = 0
+
+
+          def call(method, **params):
+              global _id
+              _id += 1
+              ws.send(json.dumps({"id": _id, "method": method, "params": params}))
+              while True:
+                  msg = json.loads(ws.recv())
+                  if msg.get("id") == _id:
+                      if "error" in msg:
+                          raise RuntimeError(msg["error"])
+                      return msg["result"]
+
+
+          def js(expr):
+              r = call("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
+              return r.get("result", {}).get("value")
+
+
+          # Wait for the page to finish loading, then let the JS tests run
+          for _ in range(60):
+              if js("document.readyState") == "complete":
+                  break
+              time.sleep(1)
+          time.sleep(20)
+
+          # Scroll through the page to trigger lazy-loaded sections
+          height = js("document.documentElement.scrollHeight") or 0
+          y = 0
+          while y < height:
+              js(f"window.scrollTo(0, {y})")
+              time.sleep(0.7)
+              y += 500
+              height = js("document.documentElement.scrollHeight") or height
+          time.sleep(5)
+          js("window.scrollTo(0, 0)")
+          time.sleep(2)
+
+          # Save all visible text from the page too
+          text = js("document.body.innerText") or ""
+          with open(f"{OUT}/deviceinfo_text.txt", "w", encoding="utf-8") as f:
+              f.write(text)
+
+          metrics = call("Page.getLayoutMetrics")
+          size = metrics.get("cssContentSize") or metrics["contentSize"]
+          width = int(size["width"])
+          total = min(int(size["height"]), MAX_CSS_PX)
+          print(f"Page size (css px): {width} x {size['height']}")
+
+          parts = []
+          top = 0
+          while top < total:
+              h = min(CHUNK_CSS_PX, total - top)
+              r = call(
+                  "Page.captureScreenshot",
+                  format="png",
+                  fromSurface=True,
+                  captureBeyondViewport=True,
+                  clip={"x": 0, "y": top, "width": width, "height": h, "scale": SCALE},
+              )
+              parts.append(base64.b64decode(r["data"]))
+              top += h
+
+          if len(parts) == 1:
+              with open(f"{OUT}/08_deviceinfo_full_page.png", "wb") as f:
+                  f.write(parts[0])
+          else:
+              for i, data in enumerate(parts, 1):
+                  with open(f"{OUT}/08_deviceinfo_full_page_part{i:02d}.png", "wb") as f:
+                      f.write(data)
+          print(f"Saved {len(parts)} full-page screenshot file(s)")
+          ws.close()
+          PY
+
+      - name: Start Emulator + Take Screenshots
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          ram-size: 4096M
+          disk-size: 8G
+          cores: 2
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -no-metrics -writable-system
+          disable-animations: true
+          script: |
+            mkdir -p screenshots
+            bash scripts/set-model.sh "$DEVICE_MODEL" "$DEVICE_BRAND" "$DEVICE_MANUF" "$DEVICE_BUILD" > screenshots/set_model_log.txt 2>&1 || echo "Model patch failed, continuing with default model"
+            cat screenshots/set_model_log.txt
+            adb shell "settings put global device_name '$DEVICE_MODEL'" || echo "device_name failed"
+
+            adb shell settings put secure immersive_mode_confirmations confirmed
+            adb shell settings put global policy_control immersive.full=*
+            adb shell settings put global policy_control null
+            adb shell settings put secure show_ime_with_hard_keyboard 0
+            adb shell wm size 720x1612
+            adb shell wm density 270
+            sleep 10
+
+            adb shell input keyevent KEYCODE_WAKEUP
+            adb shell input keyevent 82
+            adb shell input keyevent KEYCODE_HOME
+            sleep 8
+            adb exec-out screencap -p > screenshots/01_home.png
+
+            adb shell am start -a android.settings.SETTINGS
+            sleep 8
+            adb exec-out screencap -p > screenshots/02_settings.png
+
+            adb shell am start -a android.settings.DEVICE_INFO_SETTINGS
+            sleep 8
+            adb exec-out screencap -p > screenshots/03_about_phone_top.png
+
+            adb shell input swipe 360 1300 360 500 400
+            sleep 3
+            adb exec-out screencap -p > screenshots/04_about_phone_scrolled.png
+
+            adb shell input swipe 360 1300 360 500 400
+            sleep 3
+            adb exec-out screencap -p > screenshots/05_about_phone_scrolled_more.png
+
+            adb shell am start -a android.settings.DISPLAY_SETTINGS
+            sleep 6
+            adb exec-out screencap -p > screenshots/06_display_settings.png
+
+            bash scripts/chrome-deviceinfo.sh > screenshots/chrome_log.txt 2>&1 || echo "Chrome step failed, see chrome_log.txt"
+            cat screenshots/chrome_log.txt
+
+            adb shell wm size > screenshots/display_info.txt
+            adb shell wm density >> screenshots/display_info.txt
+            adb shell getprop > screenshots/all_props.txt
+            adb shell getprop ro.product.model > screenshots/model.txt
+            adb shell getprop ro.product.brand >> screenshots/model.txt
+            adb shell getprop ro.product.manufacturer >> screenshots/model.txt
+            adb shell getprop ro.build.display.id >> screenshots/model.txt
+            adb shell getprop ro.build.version.release >> screenshots/model.txt
+
+            ls -l screenshots
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-screenshots
+          path: screenshots/
+          if-no-files-found: warn
+          retention-days: 7
